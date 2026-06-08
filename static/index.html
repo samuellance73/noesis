@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Noesis — Intelligent LLM Workspace</title>
+    <meta name="description" content="A premium, state-of-the-art web interface for interacting with large language models.">
+    <!-- Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    
+    <!-- Highlight.js Tokyo Night Dark Theme -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/tokyo-night-dark.min.css">
+    
+    <!-- Bespoke Stylesheet -->
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Sidebar -->
+        <aside class="sidebar" id="sidebar">
+            <div class="sidebar-header">
+                <div class="brand">
+                    <div class="brand-logo">
+                        <span class="logo-inner">N</span>
+                    </div>
+                    <div class="brand-text">
+                        <h1>Noesis</h1>
+                        <span class="brand-subtitle">AI Workspace</span>
+                    </div>
+                </div>
+                <button class="mobile-close-btn" id="mobileCloseBtn" title="Close Sidebar">
+                    <i data-lucide="x"></i>
+                </button>
+            </div>
+
+            <button class="new-chat-btn" id="newChatBtn">
+                <i data-lucide="plus"></i>
+                <span>New Conversation</span>
+            </button>
+
+            <!-- Conversations History List -->
+            <div class="sidebar-section history-section">
+                <h3 class="section-title">Conversations</h3>
+                <div class="conversations-list" id="conversationsList">
+                    <!-- Dynamic chats go here -->
+                </div>
+            </div>
+
+            <!-- Parameters Panel -->
+            <div class="sidebar-section config-section">
+                <h3 class="section-title">Workspace Settings</h3>
+                
+                <!-- Model Selection -->
+                <div class="config-group">
+                    <label for="modelSelect">Active Model</label>
+                    <div class="model-select-wrapper">
+                        <select id="modelSelect" class="config-input">
+                            <option value="" disabled selected>Loading models...</option>
+                        </select>
+                        <i data-lucide="chevron-down" class="select-arrow"></i>
+                    </div>
+                </div>
+
+                <!-- Temperature -->
+                <div class="config-group">
+                    <div class="slider-header">
+                        <label for="temperatureSlider">Temperature</label>
+                        <span id="temperatureVal" class="slider-value">0.7</span>
+                    </div>
+                    <input type="range" id="temperatureSlider" class="config-slider" min="0" max="2" step="0.1" value="0.7">
+                </div>
+
+                <!-- Max Tokens -->
+                <div class="config-group">
+                    <div class="slider-header">
+                        <label for="maxTokensInput">Max Tokens</label>
+                        <span id="maxTokensVal" class="slider-value">Default</span>
+                    </div>
+                    <input type="range" id="maxTokensInput" class="config-slider" min="256" max="8192" step="256" value="4096">
+                    <div class="checkbox-wrapper">
+                        <input type="checkbox" id="unlimitedTokens" checked>
+                        <label for="unlimitedTokens">Unlimited (Maximum)</label>
+                    </div>
+                </div>
+
+                <!-- System Prompt Toggle & Textarea -->
+                <div class="config-group system-prompt-group">
+                    <div class="system-prompt-header">
+                        <label for="systemPrompt">System Directive</label>
+                        <button class="icon-toggle-btn" id="systemPromptToggle" title="Toggle System Prompt">
+                            <i data-lucide="eye"></i>
+                        </button>
+                    </div>
+                    <textarea id="systemPrompt" class="config-textarea" placeholder="You are a helpful assistant..."></textarea>
+                </div>
+            </div>
+
+            <!-- Sidebar Footer -->
+            <div class="sidebar-footer">
+                <div class="api-status">
+                    <span class="status-dot online"></span>
+                    <span>Connected to Space v1</span>
+                </div>
+                <button class="clear-all-btn" id="clearAllBtn" title="Clear all local data">
+                    <i data-lucide="trash-2"></i>
+                    <span>Reset Data</span>
+                </button>
+            </div>
+        </aside>
+
+        <!-- Main Chat Area -->
+        <main class="main-content">
+            <!-- Header -->
+            <header class="chat-header">
+                <div class="header-left">
+                    <button class="menu-toggle-btn" id="menuToggleBtn" title="Open Sidebar">
+                        <i data-lucide="menu"></i>
+                    </button>
+                    <div class="active-chat-info">
+                        <h2 id="activeChatTitle">New Chat</h2>
+                        <div class="model-badge">
+                            <i data-lucide="cpu"></i>
+                            <span id="activeModelBadge">No model selected</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="header-right">
+                    <button class="header-action-btn" id="exportChatBtn" title="Export Conversation as JSON">
+                        <i data-lucide="download"></i>
+                    </button>
+                    <button class="header-action-btn" id="clearChatBtn" title="Clear current messages">
+                        <i data-lucide="rotate-ccw"></i>
+                    </button>
+                </div>
+            </header>
+
+            <!-- Messages Container -->
+            <div class="messages-container" id="messagesContainer">
+                <!-- Empty State -->
+                <div class="empty-state" id="emptyState">
+                    <div class="welcome-animation">
+                        <div class="glow-sphere purple"></div>
+                        <div class="glow-sphere blue"></div>
+                        <div class="welcome-icon">
+                            <i data-lucide="sparkles"></i>
+                        </div>
+                    </div>
+                    <h2 class="welcome-title">How can I help you today?</h2>
+                    <p class="welcome-subtitle">Ask questions, generate ideas, debug code, or refine your logic using real-time LLM inference.</p>
+                    
+                    <div class="suggestions-grid">
+                        <div class="suggestion-card" data-prompt="Write a clean Python script to scrape a webpage using BeautifulSoup, with comments explaining error handling.">
+                            <div class="card-icon"><i data-lucide="code-2"></i></div>
+                            <h4>Develop Code</h4>
+                            <p>"Write a python script with BeautifulSoup..."</p>
+                        </div>
+                        <div class="suggestion-card" data-prompt="Create a high-converting landing page headline and subheadline for a SaaS application that automates workspace productivity.">
+                            <div class="card-icon"><i data-lucide="pen-tool"></i></div>
+                            <h4>Copywriting</h4>
+                            <p>"Create SaaS landing page headlines..."</p>
+                        </div>
+                        <div class="suggestion-card" data-prompt="Explain the core difference between REST APIs and gRPC in simple terms, using real-world analogies.">
+                            <div class="card-icon"><i data-lucide="help-circle"></i></div>
+                            <h4>Explain Concepts</h4>
+                            <p>"Explain REST APIs vs gRPC..."</p>
+                        </div>
+                        <div class="suggestion-card" data-prompt="Act as a tech architect. Review this idea: 'A decentralized marketplace for computing power'. What are the major technical risks?">
+                            <div class="card-icon"><i data-lucide="brain"></i></div>
+                            <h4>Brainstorming</h4>
+                            <p>"Deconstruct risks of decentralized GPU sharing..."</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Active messages will be injected here -->
+            </div>
+
+            <!-- Input Controls -->
+            <footer class="chat-input-container">
+                <div class="input-panel-wrapper">
+                    <!-- Typing Indicator -->
+                    <div class="typing-indicator-wrapper" id="typingIndicator">
+                        <div class="typing-indicator">
+                            <span></span>
+                            <span></span>
+                            <span></span>
+                        </div>
+                        <span class="typing-text">Generating response...</span>
+                    </div>
+
+                    <!-- Input Toolbar -->
+                    <div class="input-toolbar">
+                        <div class="toolbar-left">
+                            <div class="input-stat">
+                                <i data-lucide="hash"></i>
+                                <span id="charCount">0 chars</span>
+                            </div>
+                        </div>
+                        <div class="toolbar-right">
+                            <span class="keyboard-tip">Press Enter to Send, Shift+Enter for Newline</span>
+                        </div>
+                    </div>
+
+                    <!-- Input Box -->
+                    <div class="input-box-area">
+                        <textarea id="chatInput" rows="1" placeholder="Send a message..." autofocus></textarea>
+                        <button class="send-btn" id="sendBtn" title="Send Message">
+                            <i data-lucide="send"></i>
+                        </button>
+                    </div>
+                </div>
+            </footer>
+        </main>
+    </div>
+
+    <!-- Script imports -->
+    <!-- Marked for markdown parsing -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <!-- Highlight.js for code highlights -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <!-- Lucide icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <!-- Custom JavaScript -->
+    <script src="script.js"></script>
+</body>
+</html>
