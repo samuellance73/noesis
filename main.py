@@ -6,6 +6,10 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 app = FastAPI(
     title="Noesis LLM Client",
@@ -21,8 +25,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-UPSTREAM_API_URL = "https://alisaajer-newrepo18.hf.space/v1"
-API_KEY = "sk-pass1"
+UPSTREAM_API_URL = os.getenv("UPSTREAM_API_URL", "https://alisaajer-newrepo18.hf.space/v1")
+API_KEY = os.getenv("API_KEY", "")
 
 headers = {
     "Authorization": f"Bearer {API_KEY}",
