@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
-load_dotenv()
+load_dotenv(override=True)
 
 from main import app
 from integrations.api import UPSTREAM_API_URL, API_KEY

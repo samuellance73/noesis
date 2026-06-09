@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 from integrations.api import router as api_router
 
 # Load environment variables from .env file
-load_dotenv()
+load_dotenv(override=True)
 
 app = FastAPI(
     title="Noesis LLM Client",
