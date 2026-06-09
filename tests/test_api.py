@@ -1,6 +1,6 @@
 import os
 import json
-import httpx
+import httpx2
 import pytest
 from fastapi.testclient import TestClient
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -16,7 +16,7 @@ client = TestClient(app)
 
 # --- Mocked Unit Tests ---
 
-@patch("httpx.AsyncClient.get")
+@patch("httpx2.AsyncClient.get")
 def test_get_models_mocked_success(mock_get):
     # Mock response
     mock_response = MagicMock()
@@ -42,7 +42,7 @@ def test_get_models_mocked_success(mock_get):
     mock_get.assert_called_once()
 
 
-@patch("httpx.AsyncClient.get")
+@patch("httpx2.AsyncClient.get")
 def test_get_models_mocked_upstream_error(mock_get):
     # Mock response with error
     mock_response = MagicMock()
@@ -50,8 +50,8 @@ def test_get_models_mocked_upstream_error(mock_get):
     mock_response.text = "Unauthorized"
     
     # We raise HTTPStatusError when raise_for_status is called
-    req = httpx.Request("GET", f"{UPSTREAM_API_URL}/models")
-    mock_response.raise_for_status.side_effect = httpx.HTTPStatusError(
+    req = httpx2.Request("GET", f"{UPSTREAM_API_URL}/models")
+    mock_response.raise_for_status.side_effect = httpx2.HTTPStatusError(
         message="Unauthorized",
         request=req,
         response=mock_response
@@ -65,7 +65,7 @@ def test_get_models_mocked_upstream_error(mock_get):
     assert "Upstream error" in response.json()["detail"]
 
 
-@patch("httpx.AsyncClient.post")
+@patch("httpx2.AsyncClient.post")
 def test_chat_non_stream_mocked_success(mock_post):
     # Mock response for non-stream
     mock_response = MagicMock()
@@ -111,7 +111,7 @@ class AsyncContextManagerMock:
         pass
 
 
-@patch("httpx.AsyncClient.stream")
+@patch("httpx2.AsyncClient.stream")
 def test_chat_stream_mocked_success(mock_stream):
     # Mock for async response
     mock_response = MagicMock()
@@ -145,7 +145,7 @@ def test_chat_stream_mocked_success(mock_stream):
     assert "[DONE]" in content
 
 
-@patch("httpx.AsyncClient.stream")
+@patch("httpx2.AsyncClient.stream")
 def test_chat_stream_mocked_upstream_error(mock_stream):
     # Mock for response that returns an error status code
     mock_response = MagicMock()
@@ -179,7 +179,7 @@ def test_live_upstream_api_connection():
     This verifies if the upstream API is working and if the credentials are valid.
     """
     print(f"\nTesting upstream connection directly to: {UPSTREAM_API_URL}")
-    with httpx.Client() as sync_client:
+    with httpx2.Client() as sync_client:
         try:
             response = sync_client.get(
                 f"{UPSTREAM_API_URL}/models",

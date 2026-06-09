@@ -1,5 +1,5 @@
 import os
-import httpx
+import httpx2
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -32,7 +32,7 @@ class ChatPayload(BaseModel):
 
 @router.get("/api/models")
 async def get_models():
-    async with httpx.AsyncClient() as client:
+    async with httpx2.AsyncClient() as client:
         try:
             response = await client.get(
                 f"{UPSTREAM_API_URL}/models",
@@ -41,7 +41,7 @@ async def get_models():
             )
             response.raise_for_status()
             return response.json()
-        except httpx.HTTPStatusError as exc:
+        except httpx2.HTTPStatusError as exc:
             raise HTTPException(
                 status_code=exc.response.status_code,
                 detail=f"Upstream error: {exc.response.text}"
@@ -65,7 +65,7 @@ async def chat_completion(payload: ChatPayload):
         upstream_payload["max_tokens"] = payload.max_tokens
 
     async def stream_generator():
-        async with httpx.AsyncClient() as client:
+        async with httpx2.AsyncClient() as client:
             try:
                 # Request a stream from upstream
                 async with client.stream(
@@ -89,7 +89,7 @@ async def chat_completion(payload: ChatPayload):
     if payload.stream:
         return StreamingResponse(stream_generator(), media_type="text/event-stream")
     else:
-        async with httpx.AsyncClient() as client:
+        async with httpx2.AsyncClient() as client:
             try:
                 response = await client.post(
                     f"{UPSTREAM_API_URL}/chat/completions",
@@ -99,7 +99,7 @@ async def chat_completion(payload: ChatPayload):
                 )
                 response.raise_for_status()
                 return response.json()
-            except httpx.HTTPStatusError as exc:
+            except httpx2.HTTPStatusError as exc:
                 raise HTTPException(
                     status_code=exc.response.status_code,
                     detail=f"Upstream error: {exc.response.text}"
