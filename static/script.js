@@ -9,7 +9,7 @@ let activeStreamController = null;
 
 // Default configuration
 const DEFAULT_SYSTEM_PROMPT = "You are Noesis, a premium and highly capable AI coding assistant. Provide clear, accurate, structured answers with well-commented code blocks where applicable.";
-const DEFAULT_MODEL = "";
+const DEFAULT_MODEL = "qwen/qwen3-32b";
 
 // ==========================================================================
 // Markdown Custom Renderer

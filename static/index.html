@@ -1,21 +1,27 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Noesis — Intelligent LLM Workspace</title>
-    <meta name="description" content="A premium, state-of-the-art web interface for interacting with large language models.">
+    <meta name="description"
+        content="A premium, state-of-the-art web interface for interacting with large language models.">
     <!-- Fonts -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-    
+    <link
+        href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+        rel="stylesheet">
+
     <!-- Highlight.js Tokyo Night Dark Theme -->
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/tokyo-night-dark.min.css">
-    
+    <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/tokyo-night-dark.min.css">
+
     <!-- Bespoke Stylesheet -->
     <link rel="stylesheet" href="style.css">
 </head>
+
 <body>
     <div class="app-container">
         <!-- Sidebar -->
@@ -51,7 +57,7 @@
             <!-- Parameters Panel -->
             <div class="sidebar-section config-section">
                 <h3 class="section-title">Workspace Settings</h3>
-                
+
                 <!-- Model Selection -->
                 <div class="config-group">
                     <label for="modelSelect">Active Model</label>
@@ -69,7 +75,8 @@
                         <label for="temperatureSlider">Temperature</label>
                         <span id="temperatureVal" class="slider-value">0.7</span>
                     </div>
-                    <input type="range" id="temperatureSlider" class="config-slider" min="0" max="2" step="0.1" value="0.7">
+                    <input type="range" id="temperatureSlider" class="config-slider" min="0" max="2" step="0.1"
+                        value="0.7">
                 </div>
 
                 <!-- Max Tokens -->
@@ -78,7 +85,8 @@
                         <label for="maxTokensInput">Max Tokens</label>
                         <span id="maxTokensVal" class="slider-value">Default</span>
                     </div>
-                    <input type="range" id="maxTokensInput" class="config-slider" min="256" max="8192" step="256" value="4096">
+                    <input type="range" id="maxTokensInput" class="config-slider" min="256" max="8192" step="256"
+                        value="4096">
                     <div class="checkbox-wrapper">
                         <input type="checkbox" id="unlimitedTokens" checked>
                         <label for="unlimitedTokens">Unlimited (Maximum)</label>
@@ -93,7 +101,8 @@
                             <i data-lucide="eye"></i>
                         </button>
                     </div>
-                    <textarea id="systemPrompt" class="config-textarea" placeholder="You are a helpful assistant..."></textarea>
+                    <textarea id="systemPrompt" class="config-textarea"
+                        placeholder="You are a helpful assistant..."></textarea>
                 </div>
             </div>
 
@@ -148,25 +157,30 @@
                         </div>
                     </div>
                     <h2 class="welcome-title">How can I help you today?</h2>
-                    <p class="welcome-subtitle">Ask questions, generate ideas, debug code, or refine your logic using real-time LLM inference.</p>
-                    
+                    <p class="welcome-subtitle">Ask questions, generate ideas, debug code, or refine your logic using
+                        real-time LLM inference.</p>
+
                     <div class="suggestions-grid">
-                        <div class="suggestion-card" data-prompt="Write a clean Python script to scrape a webpage using BeautifulSoup, with comments explaining error handling.">
+                        <div class="suggestion-card"
+                            data-prompt="Write a clean Python script to scrape a webpage using BeautifulSoup, with comments explaining error handling.">
                             <div class="card-icon"><i data-lucide="code-2"></i></div>
                             <h4>Develop Code</h4>
                             <p>"Write a python script with BeautifulSoup..."</p>
                         </div>
-                        <div class="suggestion-card" data-prompt="Create a high-converting landing page headline and subheadline for a SaaS application that automates workspace productivity.">
+                        <div class="suggestion-card"
+                            data-prompt="Create a high-converting landing page headline and subheadline for a SaaS application that automates workspace productivity.">
                             <div class="card-icon"><i data-lucide="pen-tool"></i></div>
                             <h4>Copywriting</h4>
                             <p>"Create SaaS landing page headlines..."</p>
                         </div>
-                        <div class="suggestion-card" data-prompt="Explain the core difference between REST APIs and gRPC in simple terms, using real-world analogies.">
+                        <div class="suggestion-card"
+                            data-prompt="Explain the core difference between REST APIs and gRPC in simple terms, using real-world analogies.">
                             <div class="card-icon"><i data-lucide="help-circle"></i></div>
                             <h4>Explain Concepts</h4>
                             <p>"Explain REST APIs vs gRPC..."</p>
                         </div>
-                        <div class="suggestion-card" data-prompt="Act as a tech architect. Review this idea: 'A decentralized marketplace for computing power'. What are the major technical risks?">
+                        <div class="suggestion-card"
+                            data-prompt="Act as a tech architect. Review this idea: 'A decentralized marketplace for computing power'. What are the major technical risks?">
                             <div class="card-icon"><i data-lucide="brain"></i></div>
                             <h4>Brainstorming</h4>
                             <p>"Deconstruct risks of decentralized GPU sharing..."</p>
@@ -225,4 +239,5 @@
     <!-- Custom JavaScript -->
     <script src="script.js"></script>
 </body>
+
 </html>
