@@ -1,5 +1,7 @@
 import logging
+import httpx2
 from typing import Dict, Any, Callable
+from integrations.llm.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -32,8 +34,40 @@ class ToolRegistry:
 
 tools_registry = ToolRegistry()
 
-# Example tool definition
 @tools_registry.register("web_search")
 async def web_search(query: str) -> str:
-    # Integration logic with search service (e.g., Tavily or DuckDuckGo)
-    return f"Search result placeholder for: {query}"
+    if not settings.tavily_api_key:
+        return "Error: tavily_api_key is not configured."
+    
+    url = "https://api.tavily.com/search"
+    payload = {
+        "api_key": settings.tavily_api_key,
+        "query": query,
+        "search_depth": "basic",
+        "include_answer": False,
+        "include_images": False,
+        "include_raw_content": False,
+        "max_results": 5
+    }
+    
+    try:
+        async with httpx2.AsyncClient() as client:
+            response = await client.post(url, json=payload, timeout=10.0)
+            response.raise_for_status()
+            data = response.json()
+            
+            results = data.get("results", [])
+            if not results:
+                return "No results found."
+                
+            formatted_results = []
+            for r in results:
+                title = r.get("title", "No Title")
+                url_str = r.get("url", "")
+                content = r.get("content", "No Content")
+                formatted_results.append(f"Title: {title}\nURL: {url_str}\nContent: {content}\n")
+                
+            return "\n".join(formatted_results)
+    except Exception as e:
+        logger.error(f"Tavily search error: {e}")
+        return f"Error executing search: {str(e)}"
