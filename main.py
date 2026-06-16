@@ -3,17 +3,12 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
-from integrations.api import router as api_router
+from integrations.llm_router import router as api_router
 
-# Load environment variables from .env file
 load_dotenv(override=True)
 
-app = FastAPI(
-    title="Noesis LLM Client",
-    description="A premium chat interface powered by FastAPI"
-)
+app = FastAPI()
 
-# Enable CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -22,10 +17,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include the LLM API routes
 app.include_router(api_router)
-
-# Mount static files to serve the frontend (from /static)
 app.mount("/", StaticFiles(directory="static", html=True), name="static")
 
 if __name__ == "__main__":

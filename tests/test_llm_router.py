@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 load_dotenv(override=True)
 
 from main import app
-from integrations.api import UPSTREAM_API_URL, API_KEY
+from integrations.llm_router import UPSTREAM_API_URL, API_KEY
 
 client = TestClient(app)
 
@@ -163,16 +163,16 @@ def test_chat_stream_mocked_upstream_error(mock_stream):
     
     response = client.post("/api/chat", json=payload)
     
-    assert response.status_code == 200 # StreamingResponse in api.py catches exceptions inside generator and yields error messages in event stream, keeping response status 200
+    assert response.status_code == 200 # StreamingResponse in llm_router.py catches exceptions inside generator and yields error messages in event stream, keeping response status 200
     assert "Upstream error 500" in response.text
 
 
 # --- Live Integration Tests (Direct LLM API Verification) ---
 
 # We only run these if API_KEY is set (meaning we have credentials to make real requests)
-API_KEY_PRESENT = bool(API_KEY and API_KEY != "sk-pass55")
+API_KEY_PRESENT = bool(API_KEY)
 
-@pytest.mark.skipif(not API_KEY_PRESENT, reason="API_KEY is not configured with a real key")
+@pytest.mark.skipif(not API_KEY_PRESENT, reason="API_KEY is not configured")
 def test_live_upstream_api_connection():
     """
     Directly tests the connection to the upstream LLM API.
@@ -197,7 +197,7 @@ def test_live_upstream_api_connection():
             pytest.fail(f"Direct connection failed: {e}")
 
 
-@pytest.mark.skipif(not API_KEY_PRESENT, reason="API_KEY is not configured with a real key")
+@pytest.mark.skipif(not API_KEY_PRESENT, reason="API_KEY is not configured")
 def test_live_proxy_models_endpoint():
     """
     Tests our FastAPI proxy models endpoint to see if it correctly forwards the response from upstream.
@@ -209,7 +209,7 @@ def test_live_proxy_models_endpoint():
     assert len(data["data"]) > 0
 
 
-@pytest.mark.skipif(not API_KEY_PRESENT, reason="API_KEY is not configured with a real key")
+@pytest.mark.skipif(not API_KEY_PRESENT, reason="API_KEY is not configured")
 def test_live_proxy_chat_completion():
     """
     Tests our FastAPI proxy chat completion endpoint with stream=False.
@@ -220,8 +220,11 @@ def test_live_proxy_chat_completion():
     models_data = models_response.json()
     assert "data" in models_data and len(models_data["data"]) > 0
     
-    # Use the first available model
-    model_name = models_data["data"][0]["id"]
+    # Find the first valid model that is not a wildcard
+    model_name = next((m["id"] for m in models_data["data"] if "*" not in m["id"]), None)
+    if not model_name:
+        pytest.skip("No concrete models found, skipping live chat test")
+        
     print(f"\nTesting live chat completion with model: {model_name}")
 
     payload = {
