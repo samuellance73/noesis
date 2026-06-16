@@ -1,9 +1,15 @@
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 from .schemas import ChatPayload
 from .service import UpstreamService
+from agents.executor import AgentExecutor
 
 router = APIRouter()
+
+class AgentRequest(BaseModel):
+    model: str
+    user_input: str
 
 # A dependency provider to extract the shared connection client from application state
 def get_upstream_service(request: Request) -> UpstreamService:
@@ -29,3 +35,12 @@ async def chat_completion(
         )
     else:
         return await service.get_chat_completion(upstream_payload)
+
+@router.post("/api/agent/run")
+async def run_agent(
+    payload: AgentRequest,
+    service: UpstreamService = Depends(get_upstream_service)
+):
+    executor = AgentExecutor(llm_service=service, model=payload.model)
+    result = await executor.run(payload.user_input)
+    return {"result": result}
