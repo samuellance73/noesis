@@ -134,5 +134,17 @@ def test_agent_endpoint_success(client):
         
         response = client.post("/api/agent/run", json=payload)
         assert response.status_code == 200
-        assert response.json() == {"result": "Agent response content"}
+        assert response.json() == {
+            "result": "Agent response content",
+            "steps": [
+                {
+                    "step": {
+                        "thought": "Ready.",
+                        "tool_call": None,
+                        "final_answer": "Agent response content"
+                    },
+                    "observation": None
+                }
+            ]
+        }
         mock_post.assert_called_once()

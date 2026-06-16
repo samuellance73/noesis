@@ -12,6 +12,7 @@ class AgentExecutor:
     def __init__(self, llm_service: UpstreamService, model: str):
         self.llm_service = llm_service
         self.model = model
+        self.state = None
 
     def _build_system_prompt(self) -> str:
         return (
@@ -29,7 +30,8 @@ class AgentExecutor:
         )
 
     async def run(self, user_input: str) -> str:
-        state = AgentState(user_input=user_input)
+        self.state = AgentState(user_input=user_input)
+        state = self.state
         
         # Build prompt messages
         messages = [
@@ -74,6 +76,10 @@ class AgentExecutor:
 
             # Check for termination
             if parsed_step.final_answer:
+                state.steps.append({
+                    "step": parsed_step.model_dump(),
+                    "observation": None
+                })
                 return parsed_step.final_answer
 
             if parsed_step.tool_call:

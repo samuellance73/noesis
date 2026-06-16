@@ -43,4 +43,7 @@ async def run_agent(
 ):
     executor = AgentExecutor(llm_service=service, model=payload.model)
     result = await executor.run(payload.user_input)
-    return {"result": result}
+    return {
+        "result": result,
+        "steps": executor.state.steps if executor.state else []
+    }

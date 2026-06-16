@@ -19,6 +19,10 @@
     <div id="app">
         <header id="topbar">
             <div id="brand">Noesis</div>
+            <div class="segmented-control" role="radiogroup" aria-label="Mode Selection">
+                <button id="chatModeBtn" class="active" role="radio" aria-checked="true">Direct Chat</button>
+                <button id="agentModeBtn" role="radio" aria-checked="false">Agent Mode</button>
+            </div>
             <select id="modelSelect">
                 <option value="" disabled selected>Loading…</option>
             </select>
