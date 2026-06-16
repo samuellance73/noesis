@@ -10,14 +10,20 @@ from dotenv import load_dotenv
 load_dotenv(override=True)
 
 from main import app
-from integrations.llm_router import UPSTREAM_API_URL, API_KEY
+from integrations.config import settings
 
-client = TestClient(app)
+UPSTREAM_API_URL = settings.upstream_api_url
+API_KEY = settings.api_key
+
+@pytest.fixture
+def client():
+    with TestClient(app) as c:
+        yield c
 
 # --- Mocked Unit Tests ---
 
 @patch("httpx2.AsyncClient.get")
-def test_get_models_mocked_success(mock_get):
+def test_get_models_mocked_success(mock_get, client):
     # Mock response
     mock_response = MagicMock()
     mock_response.status_code = 200
@@ -43,7 +49,7 @@ def test_get_models_mocked_success(mock_get):
 
 
 @patch("httpx2.AsyncClient.get")
-def test_get_models_mocked_upstream_error(mock_get):
+def test_get_models_mocked_upstream_error(mock_get, client):
     # Mock response with error
     mock_response = MagicMock()
     mock_response.status_code = 401
@@ -62,11 +68,11 @@ def test_get_models_mocked_upstream_error(mock_get):
     response = client.get("/api/models")
     
     assert response.status_code == 401
-    assert "Upstream error" in response.json()["detail"]
+    assert "Upstream API Error" in response.json()["detail"]
 
 
 @patch("httpx2.AsyncClient.post")
-def test_chat_non_stream_mocked_success(mock_post):
+def test_chat_non_stream_mocked_success(mock_post, client):
     # Mock response for non-stream
     mock_response = MagicMock()
     mock_response.status_code = 200
@@ -112,7 +118,7 @@ class AsyncContextManagerMock:
 
 
 @patch("httpx2.AsyncClient.stream")
-def test_chat_stream_mocked_success(mock_stream):
+def test_chat_stream_mocked_success(mock_stream, client):
     # Mock for async response
     mock_response = MagicMock()
     mock_response.status_code = 200
@@ -146,7 +152,7 @@ def test_chat_stream_mocked_success(mock_stream):
 
 
 @patch("httpx2.AsyncClient.stream")
-def test_chat_stream_mocked_upstream_error(mock_stream):
+def test_chat_stream_mocked_upstream_error(mock_stream, client):
     # Mock for response that returns an error status code
     mock_response = MagicMock()
     mock_response.status_code = 500
@@ -163,7 +169,7 @@ def test_chat_stream_mocked_upstream_error(mock_stream):
     
     response = client.post("/api/chat", json=payload)
     
-    assert response.status_code == 200 # StreamingResponse in llm_router.py catches exceptions inside generator and yields error messages in event stream, keeping response status 200
+    assert response.status_code == 200 # StreamingResponse catches exceptions inside generator and yields error messages in event stream
     assert "Upstream error 500" in response.text
 
 
@@ -198,7 +204,7 @@ def test_live_upstream_api_connection():
 
 
 @pytest.mark.skipif(not API_KEY_PRESENT, reason="API_KEY is not configured")
-def test_live_proxy_models_endpoint():
+def test_live_proxy_models_endpoint(client):
     """
     Tests our FastAPI proxy models endpoint to see if it correctly forwards the response from upstream.
     """
@@ -210,7 +216,7 @@ def test_live_proxy_models_endpoint():
 
 
 @pytest.mark.skipif(not API_KEY_PRESENT, reason="API_KEY is not configured")
-def test_live_proxy_chat_completion():
+def test_live_proxy_chat_completion(client):
     """
     Tests our FastAPI proxy chat completion endpoint with stream=False.
     """
@@ -220,10 +226,14 @@ def test_live_proxy_chat_completion():
     models_data = models_response.json()
     assert "data" in models_data and len(models_data["data"]) > 0
     
-    # Find the first valid model that is not a wildcard
-    model_name = next((m["id"] for m in models_data["data"] if "*" not in m["id"]), None)
+    # Find the first valid model that is not a wildcard and not a guard/moderation model
+    model_name = next(
+        (m["id"] for m in models_data["data"] 
+         if "*" not in m["id"] and "guard" not in m["id"].lower()), 
+        None
+    )
     if not model_name:
-        pytest.skip("No concrete models found, skipping live chat test")
+        pytest.skip("No concrete non-guard models found, skipping live chat test")
         
     print(f"\nTesting live chat completion with model: {model_name}")
 

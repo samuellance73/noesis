@@ -1,13 +1,36 @@
+from contextlib import asynccontextmanager
+import httpx2
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from dotenv import load_dotenv
 
-from integrations.llm_router import router as api_router
+from integrations.config import settings
+from integrations.router import router
 
-load_dotenv(override=True)
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Configure the persistent client headers globally
+    headers = {
+        "Authorization": f"Bearer {settings.api_key}",
+        "Content-Type": "application/json"
+    }
+    
+    # Ensure base_url ends with a trailing slash so that relative URL resolution works properly
+    base_url = settings.upstream_api_url
+    if not base_url.endswith("/"):
+        base_url += "/"
 
-app = FastAPI()
+    # Open connection pool on startup
+    async with httpx2.AsyncClient(
+        base_url=base_url,
+        headers=headers,
+        timeout=30.0
+    ) as client:
+        app.state.upstream_client = client
+        yield
+    # Closes connection pool cleanly on shutdown
+
+app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -17,7 +40,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(api_router)
+app.include_router(router)
 app.mount("/", StaticFiles(directory="static", html=True), name="static")
 
 if __name__ == "__main__":
