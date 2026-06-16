@@ -10,8 +10,9 @@ class ToolRegistry:
     def __init__(self):
         self.tools: Dict[str, Callable] = {}
 
-    def register(self, name: str):
+    def register(self, name: str, description: str = ""):
         def decorator(func: Callable):
+            func.description = description
             self.tools[name] = func
             return func
         return decorator
@@ -34,7 +35,7 @@ class ToolRegistry:
 
 tools_registry = ToolRegistry()
 
-@tools_registry.register("web_search")
+@tools_registry.register("web_search", description="Perform a web search using Tavily API. Useful for finding current information on the internet.")
 async def web_search(query: str) -> str:
     if not settings.tavily_api_key:
         return "Error: tavily_api_key is not configured."

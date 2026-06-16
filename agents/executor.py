@@ -1,6 +1,6 @@
 import json
 import logging
-from typing import Optional
+from typing import Optional, AsyncGenerator
 from integrations.llm.service import UpstreamService
 from integrations.llm.schemas import ChatMessage, ChatPayload
 from .schemas import AgentState, AgentStep
@@ -12,14 +12,49 @@ class AgentExecutor:
     def __init__(self, llm_service: UpstreamService, model: str):
         self.llm_service = llm_service
         self.model = model
-        self.state = None
+        self.state = AgentState()
+
+    @staticmethod
+    def _parse_agent_step(raw: str) -> AgentStep:
+        clean = raw.strip()
+        
+        # 1. Remove <think>...</think> tags and content if present
+        if "<think>" in clean and "</think>" in clean:
+            parts = clean.split("</think>", 1)
+            clean = parts[1].strip()
+        elif "</think>" in clean: # Handle edge case where <think> was truncated
+            clean = clean.split("</think>", 1)[1].strip()
+            
+        # 2. Strip out markdown code blocks if the model wrapped the JSON
+        if clean.startswith("```json"):
+            clean = clean.split("```json")[1].split("```")[0].strip()
+        elif clean.startswith("```"):
+            clean = clean.split("```")[1].split("```")[0].strip()
+            
+        # 3. Robust extraction: locate the outermost JSON object braces
+        # This strips away any stray conversational text the model appended before or after the JSON
+        try:
+            start_idx = clean.index("{")
+            end_idx = clean.rindex("}")
+            clean = clean[start_idx:end_idx + 1]
+        except ValueError:
+            # If braces are missing altogether, let the validation pass 
+            # to let Pydantic raise a standard schema validation error
+            pass
+
+        # 4. Parse with strict=False to allow raw control characters
+        parsed_dict = json.loads(clean, strict=False)
+        return AgentStep.model_validate(parsed_dict)
 
     def _build_system_prompt(self) -> str:
+        tool_docs = "\n".join(
+            f"- {name}: {tool.description}"
+            for name, tool in tools_registry.tools.items()
+        )
         return (
             "You are an agent with access to tools. You must execute steps sequentially: "
             "Think about what to do, select a tool, analyze the observation, and decide the next step.\n"
-            "You have access to the following tools:\n"
-            "- web_search: Use this to search information. Input is a search query string.\n\n"
+            f"You have access to the following tools:\n{tool_docs}\n\n"
             "You MUST respond ONLY with a JSON object in the following format:\n"
             "{\n"
             '  "thought": "your reasoning here",\n'
@@ -30,7 +65,15 @@ class AgentExecutor:
         )
 
     async def run(self, user_input: str) -> str:
-        self.state = AgentState(user_input=user_input)
+        async for event in self.run_generator(user_input):
+            if event["event"] == "final_answer":
+                return event["answer"]
+            if event["event"] == "error":
+                return event["message"]
+        return "Agent reached execution limit."
+
+    async def run_generator(self, user_input: str) -> AsyncGenerator[dict, None]:
+        self.state.user_input = user_input
         state = self.state
         
         # Build prompt messages
@@ -40,58 +83,71 @@ class AgentExecutor:
         ]
 
         for i in range(state.max_iterations):
-            logger.info(f"Agent Loop Iteration {i + 1}")
+            # Send status update of current iteration
+            yield {"event": "iteration_start", "iteration": i + 1}
 
-            # 1. Ask the LLM what to do next
             payload = ChatPayload(
                 model=self.model,
                 messages=[ChatMessage(**m) for m in messages],
-                temperature=0.1,  # Lower temperature helps with structured logic output
+                temperature=0.1,
                 stream=False
             )
             
-            raw_response = await self.llm_service.get_chat_completion(
-                payload.model_dump(exclude_none=True)
-            )
-            
-            # Extract content (assuming OpenAI format)
+            try:
+                raw_response = await self.llm_service.get_chat_completion(
+                    payload.model_dump(exclude_none=True)
+                )
+            except Exception as e:
+                yield {"event": "error", "message": f"Upstream call failed: {str(e)}"}
+                return
+
             assistant_content = raw_response["choices"][0]["message"]["content"]
             
-            # 2. Parse the LLM output
             try:
-                # Basic JSON sanitization if the LLM includes markdown code blocks
-                clean_json = assistant_content.strip()
-                if clean_json.startswith("```json"):
-                    clean_json = clean_json.split("```json")[1].split("```")[0].strip()
-                elif clean_json.startswith("```"):
-                    clean_json = clean_json.split("```")[1].split("```")[0].strip()
-
-                parsed_step = AgentStep.model_validate_json(clean_json)
+                parsed_step = self._parse_agent_step(assistant_content)
             except Exception as e:
-                logger.error(f"Failed to parse agent step: {e}. Content: {assistant_content}")
-                return "The agent failed to parse its internal instructions."
+                yield {"event": "error", "message": f"Failed to parse model instructions: {str(e)}"}
+                return
 
-            # Append the LLM's thought processes to history to preserve agent state
             messages.append({"role": "assistant", "content": assistant_content})
 
-            # Check for termination
+            # Stream the reasoning thought to the UI
+            yield {
+                "event": "thought", 
+                "thought": parsed_step.thought, 
+                "step_index": i
+            }
+
             if parsed_step.final_answer:
                 state.steps.append({
                     "step": parsed_step.model_dump(),
                     "observation": None
                 })
-                return parsed_step.final_answer
+                yield {"event": "final_answer", "answer": parsed_step.final_answer}
+                return
 
             if parsed_step.tool_call:
                 tool_name = parsed_step.tool_call.tool_name
                 tool_input = parsed_step.tool_call.tool_input
 
-                logger.info(f"Executing tool: {tool_name} with input: {tool_input}")
+                # Notify the UI that a tool execution is beginning
+                yield {
+                    "event": "tool_start", 
+                    "tool_name": tool_name, 
+                    "tool_input": tool_input,
+                    "step_index": i
+                }
                 
-                # 3. Act: Execute the tool
                 observation = await tools_registry.execute(tool_name, tool_input)
                 
-                # 4. Perceive: Put the action observation back into context
+                # Notify the UI with the tool's result
+                yield {
+                    "event": "tool_observation", 
+                    "tool_name": tool_name, 
+                    "observation": observation,
+                    "step_index": i
+                }
+
                 observation_message = {
                     "role": "user", 
                     "content": f"Observation from '{tool_name}': {observation}"
@@ -103,8 +159,7 @@ class AgentExecutor:
                     "observation": observation
                 })
             else:
-                # If there's no tool call and no final answer, stop the loop to prevent deadlocks
-                logger.warning("Agent returned no tool call or final answer.")
+                yield {"event": "error", "message": "No tool call or final answer was provided."}
                 break
 
-        return "The agent reached its execution limit without finding a final answer."
+        yield {"event": "error", "message": "Execution limit reached without finding a final answer."}

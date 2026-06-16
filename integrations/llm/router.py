@@ -1,3 +1,4 @@
+import json
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -10,6 +11,7 @@ router = APIRouter()
 class AgentRequest(BaseModel):
     model: str
     user_input: str
+    stream: bool = False
 
 # A dependency provider to extract the shared connection client from application state
 def get_upstream_service(request: Request) -> UpstreamService:
@@ -42,8 +44,17 @@ async def run_agent(
     service: UpstreamService = Depends(get_upstream_service)
 ):
     executor = AgentExecutor(llm_service=service, model=payload.model)
+
+    if payload.stream:
+        async def event_generator():
+            async for step_update in executor.run_generator(payload.user_input):
+                # Format as standard Server-Sent Event (SSE)
+                yield f"data: {json.dumps(step_update)}\n\n"
+        return StreamingResponse(event_generator(), media_type="text/event-stream")
+
     result = await executor.run(payload.user_input)
     return {
         "result": result,
-        "steps": executor.state.steps if executor.state else []
+        "steps": executor.state.steps
     }
+

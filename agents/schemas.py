@@ -11,7 +11,7 @@ class AgentStep(BaseModel):
     final_answer: Optional[str] = Field(None, description="The final response to the user, if complete.")
 
 class AgentState(BaseModel):
-    user_input: str
+    user_input: str = ""
     history: List[dict] = []
     steps: List[dict] = []  # Logs of previous thoughts and tool execution results
     max_iterations: int = 5

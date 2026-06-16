@@ -120,18 +120,23 @@ async function send() {
     const assistantEl = renderMessage("assistant", "▋", assistantIndex);
 
     if (currentMode === "agent") {
-        // Render thinking loader
+        // 1. Initial visual state for starting the loop
         assistantEl.innerHTML = `
             <div class="agent-thinking" style="display:flex; align-items:center; gap:8px; color:var(--dim); font-size:13.5px; font-family:var(--font-mono)">
                 <span class="spinner"></span>
-                <span>Agent is executing ReAct loop (thinking, selecting tools)...</span>
+                <span id="agent-loop-status">Starting ReAct Loop...</span>
             </div>
         `;
+
+        // Local state to keep track of steps as they stream in
+        let streamingSteps = [];
+        let finalAnswer = "";
+
         try {
             const res = await fetch("/api/agent/run", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ model, user_input: text }),
+                body: JSON.stringify({ model, user_input: text, stream: true }),
             });
 
             if (!res.ok) {
@@ -139,11 +144,72 @@ async function send() {
                 throw new Error(err.detail || `HTTP ${res.status}`);
             }
 
-            const data = await res.json();
-            messages[assistantIndex].content = data.result;
+            const reader = res.body.getReader();
+            const dec = new TextDecoder();
+            let buf = "";
 
-            const html = buildAgentStepsHTML(data.result, data.steps);
-            updateMessageHTML(assistantIndex, html);
+            while (true) {
+                const { value, done } = await reader.read();
+                if (done) break;
+
+                buf += dec.decode(value, { stream: true });
+                const lines = buf.split("\n");
+                buf = lines.pop(); // Keep incomplete line in the buffer
+
+                for (const line of lines) {
+                    const t = line.trim();
+                    if (!t || !t.startsWith("data: ")) continue;
+
+                    try {
+                        const eventData = JSON.parse(t.slice(6));
+                        const stepIdx = eventData.step_index;
+
+                        // Ensure local array matches current step index
+                        if (stepIdx !== undefined && !streamingSteps[stepIdx]) {
+                            streamingSteps[stepIdx] = { step: {}, observation: null };
+                        }
+
+                        switch (eventData.event) {
+                            case "iteration_start":
+                                const statusText = document.getElementById("agent-loop-status");
+                                if (statusText) {
+                                    statusText.textContent = `Iteration ${eventData.iteration}: Reasoning...`;
+                                }
+                                break;
+
+                            case "thought":
+                                streamingSteps[stepIdx].step.thought = eventData.thought;
+                                // Re-render current progress
+                                updateMessageHTML(assistantIndex, buildAgentStepsHTML(finalAnswer, streamingSteps));
+                                break;
+
+                            case "tool_start":
+                                streamingSteps[stepIdx].step.tool_call = {
+                                    tool_name: eventData.tool_name,
+                                    tool_input: eventData.tool_input
+                                };
+                                updateMessageHTML(assistantIndex, buildAgentStepsHTML(finalAnswer, streamingSteps));
+                                break;
+
+                            case "tool_observation":
+                                streamingSteps[stepIdx].observation = eventData.observation;
+                                updateMessageHTML(assistantIndex, buildAgentStepsHTML(finalAnswer, streamingSteps));
+                                break;
+
+                            case "final_answer":
+                                finalAnswer = eventData.answer;
+                                messages[assistantIndex].content = finalAnswer;
+                                updateMessageHTML(assistantIndex, buildAgentStepsHTML(finalAnswer, streamingSteps));
+                                break;
+
+                            case "error":
+                                throw new Error(eventData.message);
+                        }
+                    } catch (err) {
+                        console.error("Parse error in stream line:", err, t);
+                    }
+                }
+            }
         } catch (e) {
             const errText = `\n\n*Error: ${e.message}*`;
             messages[assistantIndex].content = errText;
