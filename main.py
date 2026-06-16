@@ -4,8 +4,8 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 
-from integrations.config import settings
-from integrations.router import router
+from integrations.llm.config import settings
+from integrations.llm.router import router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

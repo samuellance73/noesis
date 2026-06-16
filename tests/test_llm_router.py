@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 load_dotenv(override=True)
 
 from main import app
-from integrations.config import settings
+from integrations.llm.config import settings
 
 UPSTREAM_API_URL = settings.upstream_api_url
 API_KEY = settings.api_key
