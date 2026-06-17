@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from .schemas import ChatPayload
-from .service import UpstreamService
+from .service import UpstreamService, handle_upstream_errors
 from agents.orchestrator import AgentOrchestrator
 
 router = APIRouter()
@@ -23,7 +23,8 @@ def get_upstream_service(request: Request) -> UpstreamService:
 
 @router.get("/api/models")
 async def get_models(service: UpstreamService = Depends(get_upstream_service)):
-    return await service.fetch_models()
+    async with handle_upstream_errors():
+        return await service.fetch_models()
 
 
 @router.post("/api/chat")
@@ -40,7 +41,8 @@ async def chat_completion(
             media_type="text/event-stream"
         )
     else:
-        return await service.get_chat_completion(upstream_payload)
+        async with handle_upstream_errors():
+            return await service.get_chat_completion(upstream_payload)
 
 
 @router.post("/api/agent/run")
@@ -57,4 +59,5 @@ async def run_agent(
 
         return StreamingResponse(event_generator(), media_type="text/event-stream")
 
-    return await orchestrator.run(payload.user_input)
+    async with handle_upstream_errors():
+        return await orchestrator.run(payload.user_input)

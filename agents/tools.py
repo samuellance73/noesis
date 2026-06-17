@@ -1,7 +1,7 @@
 import logging
+import os
 import httpx2
 from typing import Dict, Any, Callable
-from integrations.llm.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -37,12 +37,13 @@ tools_registry = ToolRegistry()
 
 @tools_registry.register("web_search", description="Perform a web search using Tavily API. Useful for finding current information on the internet.")
 async def web_search(query: str) -> str:
-    if not settings.tavily_api_key:
-        return "Error: tavily_api_key is not configured."
+    tavily_api_key = os.environ.get("TAVILY_API_KEY", "")
+    if not tavily_api_key:
+        return "Error: TAVILY_API_KEY is not configured."
     
     url = "https://api.tavily.com/search"
     payload = {
-        "api_key": settings.tavily_api_key,
+        "api_key": tavily_api_key,
         "query": query,
         "search_depth": "basic",
         "include_answer": False,

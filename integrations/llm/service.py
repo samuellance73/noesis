@@ -63,17 +63,17 @@ class UpstreamService:
 
     @retry(**_retry_policy)
     async def fetch_models(self) -> dict:
-        async with handle_upstream_errors():
-            response = await self.client.get("models")
-            response.raise_for_status()
-            return response.json()
+        """Raw httpx exceptions bubble out so @retry can act on them."""
+        response = await self.client.get("models")
+        response.raise_for_status()
+        return response.json()
 
     @retry(**_retry_policy)
     async def get_chat_completion(self, payload: dict) -> dict:
-        async with handle_upstream_errors():
-            response = await self.client.post("chat/completions", json=payload)
-            response.raise_for_status()
-            return response.json()
+        """Raw httpx exceptions bubble out so @retry can act on them."""
+        response = await self.client.post("chat/completions", json=payload)
+        response.raise_for_status()
+        return response.json()
 
     async def stream_chat_completion(self, payload: dict) -> AsyncGenerator[str, None]:
         """Stream chat completions with pre-connect retries.
