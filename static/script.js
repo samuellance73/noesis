@@ -360,84 +360,112 @@ function updateMessageHTML(index, html) {
     scrollDown();
 }
 
-function buildAgentStepsHTML(result, steps) {
-    if (!steps || steps.length === 0) {
-        return marked.parse(result);
+function buildAgentStepsHTML(result, steps, planMilestones) {
+    const hasSteps = steps && steps.length > 0;
+    const hasPlan = planMilestones && planMilestones.length > 0;
+
+    if (!hasSteps && !hasPlan) {
+        return marked.parse(result || "");
     }
 
     let html = `<div class="agent-steps">`;
-    steps.forEach((s, idx) => {
-        const stepNum = idx + 1;
-        const stepData = s.step || {};
-        const thought = stepData.thought || "";
-        const toolCall = stepData.tool_call;
-        const observation = s.observation;
-        const finalAnswer = s.final_answer;
-        const milestoneGoal = s.milestone_goal || null;
-        const milestoneIndex = s.milestone_index;
-        const milestoneLabel = milestoneIndex !== null && milestoneIndex !== undefined
-            ? `Milestone ${milestoneIndex + 1}`
-            : "Milestone";
 
-        html += `
-        <div class="agent-step">
-            <div class="step-header">
-                <span class="step-num">Step ${stepNum}</span>
-                ${milestoneGoal
-                ? `<span class="step-milestone" title="${escapeHTML(milestoneGoal)}">🎯 ${escapeHTML(milestoneLabel)}: ${escapeHTML(milestoneGoal)}</span>`
-                : `<span class="step-title">Reasoning</span>`
-            }
-            </div>
-        `;
-
-        if (thought) {
-            html += `<div class="step-thought">${escapeHTML(thought)}</div>`;
-        }
-
-        if (toolCall) {
-            html += `
-            <div class="step-action">
-                <span class="action-icon">⚙️</span>
-                <span class="action-desc">Executing tool <code>${escapeHTML(toolCall.tool_name)}</code> with input: <code>${escapeHTML(JSON.stringify(toolCall.tool_input))}</code></span>
-            </div>
-            `;
-        }
-
-        if (observation !== undefined && observation !== null) {
-            let displayObs = observation;
-            let isJson = false;
-            if (typeof observation === 'string') {
-                try {
-                    const parsed = JSON.parse(observation);
-                    displayObs = JSON.stringify(parsed, null, 2);
-                    isJson = true;
-                } catch (e) {
-                    // Not JSON, display as raw string
+    // ── Plan Overview (all milestones, with live status badges) ──────────────
+    if (hasPlan) {
+        html += `<div class="plan-overview">
+            <div class="plan-overview-header">📋 Plan</div>
+            <div class="plan-overview-list">`;
+        planMilestones.forEach((m, i) => {
+            const stepData = steps[i];
+            let statusClass = "ms-pending";
+            let statusIcon = "○";
+            if (stepData) {
+                if (stepData.final_answer) {
+                    statusClass = "ms-done";
+                    statusIcon = "✓";
+                } else {
+                    statusClass = "ms-running";
+                    statusIcon = "◉";
                 }
-            } else if (typeof observation === 'object') {
-                displayObs = JSON.stringify(observation, null, 2);
-                isJson = true;
             }
-            const codeClass = isJson ? ' class="language-json"' : '';
             html += `
-            <div class="step-observation">
-                <div class="obs-header">Observation</div>
-                <pre><code${codeClass}>${escapeHTML(displayObs)}</code></pre>
-            </div>
-            `;
-        }
+            <div class="plan-milestone-row ${statusClass}">
+                <span class="milestone-status">${statusIcon}</span>
+                <span class="milestone-label">M${i + 1}</span>
+                <span class="milestone-text">${escapeHTML(m.goal)}</span>
+            </div>`;
+        });
+        html += `</div></div>`;
+    }
 
-        if (finalAnswer) {
+    // ── Step Detail Cards (only for milestones that have started) ────────────
+    if (hasSteps) {
+        steps.forEach((s, idx) => {
+            const stepNum = idx + 1;
+            const stepData = s.step || {};
+            const thought = stepData.thought || "";
+            const toolCall = stepData.tool_call;
+            const observation = s.observation;
+            const finalAnswer = s.final_answer;
+            // Prefer authoritative planMilestones source; fall back to streamed data
+            const milestoneGoal = (planMilestones && planMilestones[idx])
+                ? planMilestones[idx].goal
+                : (s.milestone_goal || null);
+
             html += `
-            <div class="agent-final-answer">
-                <div class="final-header">💡 Final Answer</div>
-                <div class="final-content">${marked.parse(finalAnswer)}</div>
-            </div>
+            <div class="agent-step">
+                <div class="step-header">
+                    <span class="step-num">Step ${stepNum}</span>
+                    ${milestoneGoal
+                    ? `<span class="step-milestone" title="${escapeHTML(milestoneGoal)}">🎯 Milestone ${stepNum}: ${escapeHTML(milestoneGoal)}</span>`
+                    : `<span class="step-title">Reasoning</span>`
+                }
+                </div>
             `;
-        }
 
-        html += `</div>`; // Close agent-step
-    });
+            if (thought) {
+                html += `<div class="step-thought">${escapeHTML(thought)}</div>`;
+            }
+
+            if (toolCall) {
+                html += `
+                <div class="step-action">
+                    <span class="action-icon">⚙️</span>
+                    <span class="action-desc">Executing tool <code>${escapeHTML(toolCall.tool_name)}</code> with input: <code>${escapeHTML(JSON.stringify(toolCall.tool_input))}</code></span>
+                </div>`;
+            }
+
+            if (observation !== undefined && observation !== null) {
+                let displayObs = observation;
+                let isJson = false;
+                if (typeof observation === "string") {
+                    try {
+                        displayObs = JSON.stringify(JSON.parse(observation), null, 2);
+                        isJson = true;
+                    } catch (e) { /* raw string */ }
+                } else if (typeof observation === "object") {
+                    displayObs = JSON.stringify(observation, null, 2);
+                    isJson = true;
+                }
+                const codeClass = isJson ? ' class="language-json"' : "";
+                html += `
+                <div class="step-observation">
+                    <div class="obs-header">Observation</div>
+                    <pre><code${codeClass}>${escapeHTML(displayObs)}</code></pre>
+                </div>`;
+            }
+
+            if (finalAnswer) {
+                html += `
+                <div class="agent-final-answer">
+                    <div class="final-header">💡 Final Answer</div>
+                    <div class="final-content">${marked.parse(finalAnswer)}</div>
+                </div>`;
+            }
+
+            html += `</div>`; // Close agent-step
+        });
+    }
 
     html += `</div>`; // Close agent-steps
     return html;
