@@ -8,7 +8,8 @@ Rules:
 - Each milestone must be a specific, self-contained sub-goal
 - Milestones with no dependencies can run in parallel
 - Milestones that need prior results use depends_on
-- Maximum 5 milestones
+- Maximum 3 milestones
+- Do not use more milestones than needed
 - Respond ONLY with valid JSON, nothing else
 
 Format:

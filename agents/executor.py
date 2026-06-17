@@ -13,38 +13,42 @@ class AgentExecutor:
         self.llm_service = llm_service
         self.model = model
         self.state = AgentState()
+        self.llm_calls = 0  # Total LLM calls made by this executor
 
     @staticmethod
-    def _parse_agent_step(raw: str) -> AgentStep:
+    def _parse_agent_step(raw: str) -> tuple[AgentStep, Optional[str]]:
+        """Parse the raw model response into an AgentStep and extract thinking content.
+        Returns (AgentStep, thinking_text_or_None).
+        """
         clean = raw.strip()
-        
-        # 1. Remove <think>...</think> tags and content if present
+        thinking: Optional[str] = None
+
+        # 1. Extract and remove <think>...</think> block
         if "<think>" in clean and "</think>" in clean:
-            parts = clean.split("</think>", 1)
-            clean = parts[1].strip()
-        elif "</think>" in clean: # Handle edge case where <think> was truncated
+            think_start = clean.index("<think>") + len("<think>")
+            think_end = clean.index("</think>")
+            thinking = clean[think_start:think_end].strip() or None
             clean = clean.split("</think>", 1)[1].strip()
-            
-        # 2. Strip out markdown code blocks if the model wrapped the JSON
+        elif "</think>" in clean:
+            clean = clean.split("</think>", 1)[1].strip()
+
+        # 2. Strip markdown code fences if the model wrapped the JSON
         if clean.startswith("```json"):
             clean = clean.split("```json")[1].split("```")[0].strip()
         elif clean.startswith("```"):
             clean = clean.split("```")[1].split("```")[0].strip()
-            
-        # 3. Robust extraction: locate the outermost JSON object braces
-        # This strips away any stray conversational text the model appended before or after the JSON
+
+        # 3. Locate the outermost JSON object braces
         try:
             start_idx = clean.index("{")
             end_idx = clean.rindex("}")
             clean = clean[start_idx:end_idx + 1]
         except ValueError:
-            # If braces are missing altogether, let the validation pass 
-            # to let Pydantic raise a standard schema validation error
             pass
 
         # 4. Parse with strict=False to allow raw control characters
         parsed_dict = json.loads(clean, strict=False)
-        return AgentStep.model_validate(parsed_dict)
+        return AgentStep.model_validate(parsed_dict), thinking
 
     def _build_system_prompt(self) -> str:
         tool_docs = "\n".join(
@@ -101,20 +105,27 @@ class AgentExecutor:
                 yield {"event": "error", "message": f"Upstream call failed: {str(e)}"}
                 return
 
+            self.llm_calls += 1
+            yield {"event": "llm_call", "call_number": self.llm_calls, "step_index": i}
+
             assistant_content = raw_response["choices"][0]["message"]["content"]
-            
+
             try:
-                parsed_step = self._parse_agent_step(assistant_content)
+                parsed_step, thinking = self._parse_agent_step(assistant_content)
             except Exception as e:
                 yield {"event": "error", "message": f"Failed to parse model instructions: {str(e)}"}
                 return
 
             messages.append({"role": "assistant", "content": assistant_content})
 
+            # Stream <think> block to UI if present
+            if thinking:
+                yield {"event": "thinking", "content": thinking, "step_index": i}
+
             # Stream the reasoning thought to the UI
             yield {
-                "event": "thought", 
-                "thought": parsed_step.thought, 
+                "event": "thought",
+                "thought": parsed_step.thought,
                 "step_index": i
             }
 

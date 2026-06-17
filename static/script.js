@@ -187,6 +187,8 @@ async function send() {
                             planData = eventData.milestones;
                             const statusText = document.getElementById("agent-loop-status");
                             if (statusText) statusText.textContent = "Executing Plan...";
+                            // Immediately render the full plan so all milestones are visible
+                            updateMessageHTML(assistantIndex, buildAgentStepsHTML("", streamingSteps, planData));
                             continue;
                         }
 
@@ -200,7 +202,7 @@ async function send() {
                                     }
                                 });
                             }
-                            updateMessageHTML(assistantIndex, buildAgentStepsHTML("", streamingSteps));
+                            updateMessageHTML(assistantIndex, buildAgentStepsHTML("", streamingSteps, planData));
                             continue;
                         }
 
@@ -210,34 +212,39 @@ async function send() {
 
                         const stepIdx = eventData.step_index;
                         if (stepIdx !== undefined && !streamingSteps[stepIdx]) {
-                            streamingSteps[stepIdx] = { step: {}, observation: null };
+                            streamingSteps[stepIdx] = { step: {}, observation: null, milestone_index: null, milestone_goal: null };
                         }
 
                         switch (eventData.event) {
                             case "step_start":
                                 const statusText = document.getElementById("agent-loop-status");
                                 if (statusText) statusText.textContent = `Executing Step ${stepIdx + 1}: ${eventData.step_goal}...`;
+                                // Store milestone info for rendering
+                                if (streamingSteps[stepIdx]) {
+                                    streamingSteps[stepIdx].milestone_index = eventData.milestone_index ?? null;
+                                    streamingSteps[stepIdx].milestone_goal = eventData.milestone_goal ?? eventData.step_goal ?? null;
+                                }
                                 break;
                             case "iteration_start":
                                 break;
                             case "thought":
                                 streamingSteps[stepIdx].step.thought = eventData.thought;
-                                updateMessageHTML(assistantIndex, buildAgentStepsHTML(finalAnswer, streamingSteps));
+                                updateMessageHTML(assistantIndex, buildAgentStepsHTML(finalAnswer, streamingSteps, planData));
                                 break;
                             case "tool_start":
                                 streamingSteps[stepIdx].step.tool_call = {
                                     tool_name: eventData.tool_name,
                                     tool_input: eventData.tool_input
                                 };
-                                updateMessageHTML(assistantIndex, buildAgentStepsHTML(finalAnswer, streamingSteps));
+                                updateMessageHTML(assistantIndex, buildAgentStepsHTML(finalAnswer, streamingSteps, planData));
                                 break;
                             case "tool_observation":
                                 streamingSteps[stepIdx].observation = eventData.observation;
-                                updateMessageHTML(assistantIndex, buildAgentStepsHTML(finalAnswer, streamingSteps));
+                                updateMessageHTML(assistantIndex, buildAgentStepsHTML(finalAnswer, streamingSteps, planData));
                                 break;
                             case "final_answer":
                                 streamingSteps[stepIdx].final_answer = eventData.answer;
-                                updateMessageHTML(assistantIndex, buildAgentStepsHTML("", streamingSteps));
+                                updateMessageHTML(assistantIndex, buildAgentStepsHTML("", streamingSteps, planData));
                                 break;
                         }
                     } catch (err) {
@@ -366,12 +373,20 @@ function buildAgentStepsHTML(result, steps) {
         const toolCall = stepData.tool_call;
         const observation = s.observation;
         const finalAnswer = s.final_answer;
+        const milestoneGoal = s.milestone_goal || null;
+        const milestoneIndex = s.milestone_index;
+        const milestoneLabel = milestoneIndex !== null && milestoneIndex !== undefined
+            ? `Milestone ${milestoneIndex + 1}`
+            : "Milestone";
 
         html += `
         <div class="agent-step">
             <div class="step-header">
                 <span class="step-num">Step ${stepNum}</span>
-                <span class="step-title">Reasoning</span>
+                ${milestoneGoal
+                ? `<span class="step-milestone" title="${escapeHTML(milestoneGoal)}">🎯 ${escapeHTML(milestoneLabel)}: ${escapeHTML(milestoneGoal)}</span>`
+                : `<span class="step-title">Reasoning</span>`
+            }
             </div>
         `;
 
