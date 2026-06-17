@@ -2,13 +2,13 @@ import json
 from integrations.llm.service import UpstreamService
 
 PLANNER_PROMPT = """
-You are a planning agent. Given a user goal, break it into concrete steps.
+You are a planning agent. Given a user goal, break it into concrete milestones.
 
 Rules:
-- Each step must be a specific, self-contained sub-goal
-- Steps with no dependencies can run in parallel
-- Steps that need prior results use depends_on
-- Maximum 5 steps
+- Each milestone must be a specific, self-contained sub-goal
+- Milestones with no dependencies can run in parallel
+- Milestones that need prior results use depends_on
+- Maximum 5 milestones
 - Respond ONLY with valid JSON, nothing else
 
 Format:
@@ -45,19 +45,19 @@ async def plan(goal: str, service: UpstreamService) -> list[dict]:
         try:
             start = raw.index("[")
             end = raw.rindex("]") + 1
-            steps = json.loads(raw[start:end])
-            if isinstance(steps, list):
-                return steps
+            milestones = json.loads(raw[start:end])
+            if isinstance(milestones, list):
+                return milestones
         except (ValueError, json.JSONDecodeError):
             pass
 
-    # 3. Try parsing the whole thing as JSON (model may return {"steps": [...]})
+    # 3. Try parsing the whole thing as JSON (model may return {"milestones": [...]})
     try:
         parsed = json.loads(raw)
         if isinstance(parsed, list):
             return parsed
         if isinstance(parsed, dict):
-            for key in ("steps", "plan", "goals"):
+            for key in ("milestones", "steps", "plan", "goals"):
                 if key in parsed and isinstance(parsed[key], list):
                     return parsed[key]
     except json.JSONDecodeError:

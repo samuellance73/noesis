@@ -184,7 +184,7 @@ async function send() {
                         }
 
                         if (eventData.event === "plan_ready") {
-                            planData = eventData.plan;
+                            planData = eventData.milestones;
                             const statusText = document.getElementById("agent-loop-status");
                             if (statusText) statusText.textContent = "Executing Plan...";
                             continue;
@@ -192,7 +192,7 @@ async function send() {
 
                         if (eventData.event === "done") {
                             // Reuse the already-populated streamingSteps so thoughts/tools/observations are preserved.
-                            // Collect each step's final answer from eventData.results if available.
+                            // Collect each milestone's final answer from eventData.results if available.
                             if (eventData.results) {
                                 eventData.results.forEach((r, idx) => {
                                     if (streamingSteps[idx]) {

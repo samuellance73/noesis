@@ -49,37 +49,37 @@ async def run_agent(
             try:
                 # 1. Plan first
                 yield f"data: {json.dumps({'event': 'planning_start'})}\n\n"
-                steps = await plan(payload.user_input, service)
-                yield f"data: {json.dumps({'event': 'plan_ready', 'plan': steps})}\n\n"
+                milestones = await plan(payload.user_input, service)
+                yield f"data: {json.dumps({'event': 'plan_ready', 'milestones': milestones})}\n\n"
                 
-                # 2. Run each step through your existing executor
+                # 2. Run each milestone through the executor
                 results = []
-                for idx, step in enumerate(steps):
-                    yield f"data: {json.dumps({'event': 'step_start', 'step_index': idx, 'step_goal': step['goal']})}\n\n"
+                for idx, milestone in enumerate(milestones):
+                    yield f"data: {json.dumps({'event': 'step_start', 'step_index': idx, 'step_goal': milestone['goal']})}\n\n"
                     
                     executor = AgentExecutor(llm_service=service, model=payload.model)
                     final_result = None
-                    async for step_update in executor.run_generator(step["goal"]):
+                    async for step_update in executor.run_generator(milestone["goal"]):
                         step_update["step_index"] = idx
                         if step_update["event"] == "final_answer":
                             final_result = step_update["answer"]
                         yield f"data: {json.dumps(step_update)}\n\n"
                     
-                    results.append({"step": step["goal"], "result": final_result})
+                    results.append({"milestone": milestone["goal"], "result": final_result})
                 
                 # 3. Return everything
-                yield f"data: {json.dumps({'event': 'done', 'plan': steps, 'results': results})}\n\n"
+                yield f"data: {json.dumps({'event': 'done', 'milestones': milestones, 'results': results})}\n\n"
             except Exception as e:
                 yield f"data: {json.dumps({'event': 'error', 'message': str(e)})}\n\n"
                 
         return StreamingResponse(event_generator(), media_type="text/event-stream")
 
     # Fallback to non-streaming
-    steps = await plan(payload.user_input, service)
+    milestones = await plan(payload.user_input, service)
     results = []
-    for step in steps:
+    for milestone in milestones:
         executor = AgentExecutor(llm_service=service, model=payload.model)
-        result = await executor.run(step["goal"])
-        results.append({"step": step["goal"], "result": result})
-    return {"plan": steps, "results": results}
+        result = await executor.run(milestone["goal"])
+        results.append({"milestone": milestone["goal"], "result": result})
+    return {"milestones": milestones, "results": results}
 
