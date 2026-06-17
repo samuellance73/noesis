@@ -1,26 +1,19 @@
 import sys
 import os
-import httpx2
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from integrations.llm.config import settings
 from integrations.llm.service import UpstreamService
 from agents.planner import plan
 from agents.executor import AgentExecutor
+from client import get_client
 
 console = Console()
 
 async def run_terminal_interface():
-    # 1. Initialize our connection "Outlet" (HTTP client)
-    headers = {
-        "Authorization": f"Bearer {settings.api_key}",
-        "Content-Type": "application/json"
-    }
-    base_url = settings.upstream_api_url if settings.upstream_api_url.endswith("/") else f"{settings.upstream_api_url}/"
-    
-    async with httpx2.AsyncClient(base_url=base_url, headers=headers, timeout=45.0) as client:
+    # 1. Initialize our connection "Outlet" (HTTP client) using the shared client module
+    async with get_client(timeout=45.0) as client:
         service = UpstreamService(client)
         
         console.print(Panel("[bold purple]Noesis CLI Agent Client Ready[/bold purple]", expand=False))

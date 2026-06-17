@@ -5,14 +5,13 @@ from dotenv import load_dotenv
 load_dotenv(override=True)
 
 from contextlib import asynccontextmanager
-import httpx2
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 
 from utils.logging_setup import setup_global_logging
-from integrations.llm.config import settings
 from interfaces.web.router import router
+from client import get_client
 
 # Show the full trace tree in the terminal at INFO level.
 # Reduce to logging.WARNING to silence the trace and keep only errors.
@@ -21,23 +20,8 @@ setup_global_logging(console_level=logging.INFO)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Configure the persistent client headers globally
-    headers = {
-        "Authorization": f"Bearer {settings.api_key}",
-        "Content-Type": "application/json"
-    }
-    
-    # Ensure base_url ends with a trailing slash so that relative URL resolution works properly
-    base_url = settings.upstream_api_url
-    if not base_url.endswith("/"):
-        base_url += "/"
-
-    # Open connection pool on startup
-    async with httpx2.AsyncClient(
-        base_url=base_url,
-        headers=headers,
-        timeout=30.0
-    ) as client:
+    # Open connection pool on startup using the shared client module
+    async with get_client(timeout=30.0) as client:
         app.state.upstream_client = client
         yield
     # Closes connection pool cleanly on shutdown
