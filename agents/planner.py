@@ -31,8 +31,36 @@ async def plan(goal: str, service: UpstreamService) -> list[dict]:
     }
     response = await service.get_chat_completion(payload)
 
-    raw = response["choices"][0]["message"]["content"]
-    start = raw.index("[")
-    end = raw.rindex("]") + 1
-    steps = json.loads(raw[start:end])
-    return steps
+    raw = response["choices"][0]["message"]["content"].strip()
+
+    # 1. Strip markdown code fences if present
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+        raw = raw.strip()
+
+    # 2. Try to extract a JSON array first, then fall back to an object
+    if "[" in raw:
+        try:
+            start = raw.index("[")
+            end = raw.rindex("]") + 1
+            steps = json.loads(raw[start:end])
+            if isinstance(steps, list):
+                return steps
+        except (ValueError, json.JSONDecodeError):
+            pass
+
+    # 3. Try parsing the whole thing as JSON (model may return {"steps": [...]})
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, list):
+            return parsed
+        if isinstance(parsed, dict):
+            for key in ("steps", "plan", "goals"):
+                if key in parsed and isinstance(parsed[key], list):
+                    return parsed[key]
+    except json.JSONDecodeError:
+        pass
+
+    raise ValueError(f"Planner returned unparseable response: {raw[:200]}")

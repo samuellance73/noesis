@@ -160,7 +160,18 @@ async function send() {
 
                 for (const line of lines) {
                     const t = line.trim();
-                    if (t) console.log("RAW STREAM LINE:", t);
+                    if (t) {
+                        if (t.startsWith("data: ")) {
+                            try {
+                                const eventData = JSON.parse(t.slice(6));
+                                console.log("STREAM EVENT:", eventData);
+                            } catch (e) {
+                                console.log("RAW STREAM LINE:", t);
+                            }
+                        } else {
+                            console.log("RAW STREAM LINE:", t);
+                        }
+                    }
                     if (!t || !t.startsWith("data: ")) continue;
 
                     try {
@@ -180,23 +191,16 @@ async function send() {
                         }
 
                         if (eventData.event === "done") {
-                            // Final render with full results
-                            let html = `<div class="agent-steps" style="margin-top: 10px;">`;
-                            if (eventData.plan) {
-                                html += `<div class="agent-step"><div class="step-header"><span class="step-num">Agent Plan</span></div><ul style="padding-left: 20px; font-size: 14px;">`;
-                                eventData.plan.forEach(p => {
-                                    const deps = p.depends_on && p.depends_on.length > 0 ? `(Depends on: ${p.depends_on.join(', ')})` : '';
-                                    html += `<li style="margin-bottom: 4px;"><strong>Step ${p.id}:</strong> ${escapeHTML(p.goal)} <span style="color:var(--dim); font-size:0.9em;">${deps}</span></li>`;
-                                });
-                                html += `</ul></div>`;
-                            }
+                            // Reuse the already-populated streamingSteps so thoughts/tools/observations are preserved.
+                            // Collect each step's final answer from eventData.results if available.
                             if (eventData.results) {
                                 eventData.results.forEach((r, idx) => {
-                                    html += `<div class="agent-step"><div class="step-header"><span class="step-num">Step ${idx + 1} Result</span><span class="step-title">${escapeHTML(r.step)}</span></div><div class="step-thought">${marked.parse(r.result || "")}</div></div>`;
+                                    if (streamingSteps[idx]) {
+                                        streamingSteps[idx].final_answer = r.result || "";
+                                    }
                                 });
                             }
-                            html += `</div>`;
-                            updateMessageHTML(assistantIndex, html);
+                            updateMessageHTML(assistantIndex, buildAgentStepsHTML("", streamingSteps));
                             continue;
                         }
 
@@ -233,7 +237,6 @@ async function send() {
                                 break;
                             case "final_answer":
                                 streamingSteps[stepIdx].final_answer = eventData.answer;
-                                // We don't need to overwrite finalAnswer globally if we're running multiple steps
                                 updateMessageHTML(assistantIndex, buildAgentStepsHTML("", streamingSteps));
                                 break;
                         }
@@ -362,6 +365,7 @@ function buildAgentStepsHTML(result, steps) {
         const thought = stepData.thought || "";
         const toolCall = stepData.tool_call;
         const observation = s.observation;
+        const finalAnswer = s.final_answer;
 
         html += `
         <div class="agent-step">
@@ -369,8 +373,11 @@ function buildAgentStepsHTML(result, steps) {
                 <span class="step-num">Step ${stepNum}</span>
                 <span class="step-title">Reasoning</span>
             </div>
-            <div class="step-thought">${escapeHTML(thought)}</div>
         `;
+
+        if (thought) {
+            html += `<div class="step-thought">${escapeHTML(thought)}</div>`;
+        }
 
         if (toolCall) {
             html += `
@@ -382,24 +389,40 @@ function buildAgentStepsHTML(result, steps) {
         }
 
         if (observation !== undefined && observation !== null) {
+            let displayObs = observation;
+            let isJson = false;
+            if (typeof observation === 'string') {
+                try {
+                    const parsed = JSON.parse(observation);
+                    displayObs = JSON.stringify(parsed, null, 2);
+                    isJson = true;
+                } catch (e) {
+                    // Not JSON, display as raw string
+                }
+            } else if (typeof observation === 'object') {
+                displayObs = JSON.stringify(observation, null, 2);
+                isJson = true;
+            }
+            const codeClass = isJson ? ' class="language-json"' : '';
             html += `
             <div class="step-observation">
                 <div class="obs-header">Observation</div>
-                <pre><code>${escapeHTML(observation)}</code></pre>
+                <pre><code${codeClass}>${escapeHTML(displayObs)}</code></pre>
+            </div>
+            `;
+        }
+
+        if (finalAnswer) {
+            html += `
+            <div class="agent-final-answer">
+                <div class="final-header">💡 Final Answer</div>
+                <div class="final-content">${marked.parse(finalAnswer)}</div>
             </div>
             `;
         }
 
         html += `</div>`; // Close agent-step
     });
-
-    // Final Answer section
-    html += `
-    <div class="agent-final-answer">
-        <div class="final-header">💡 Final Answer</div>
-        <div class="final-content">${marked.parse(result)}</div>
-    </div>
-    `;
 
     html += `</div>`; // Close agent-steps
     return html;
