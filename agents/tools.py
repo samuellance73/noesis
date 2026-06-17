@@ -106,6 +106,11 @@ async def python_execute(code: str) -> str:
         stdout_str = stdout.decode("utf-8")
         stderr_str = stderr.decode("utf-8")
 
+        if stdout_str:
+            logger.info("[python_execute stdout]\n%s", stdout_str.rstrip())
+        if stderr_str:
+            logger.warning("[python_execute stderr]\n%s", stderr_str.rstrip())
+
         if process.returncode != 0:
             return f"Error: Process exited with code {process.returncode}\nStdout:\n{stdout_str}\nStderr:\n{stderr_str}"
 
@@ -150,6 +155,11 @@ async def run_command(command: str) -> str:
 
         stdout_str = stdout.decode("utf-8", errors="replace")
         stderr_str = stderr.decode("utf-8", errors="replace")
+
+        if stdout_str:
+            logger.info("[run_command stdout]\n%s", stdout_str.rstrip())
+        if stderr_str:
+            logger.warning("[run_command stderr]\n%s", stderr_str.rstrip())
 
         if process.returncode != 0:
             return f"Error: Command exited with code {process.returncode}\nStdout:\n{stdout_str}\nStderr:\n{stderr_str}"

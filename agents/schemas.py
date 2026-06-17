@@ -48,5 +48,5 @@ class AgentState(BaseModel):
     user_input: str = ""
     history: List[dict] = []
     steps: List[dict] = []  # Logs of previous thoughts and tool execution results
-    max_iterations: int = 5
+    max_iterations: int = 6
 

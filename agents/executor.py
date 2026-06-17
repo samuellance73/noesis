@@ -41,20 +41,46 @@ class AgentExecutor:
 
     @staticmethod
     def _parse_agent_step(raw: str) -> AgentStep:
+        import re
         clean = raw.strip()
+        
+        # 1. Strip thinking tags if present
         if "<think>" in clean and "</think>" in clean:
             clean = clean.split("</think>", 1)[1].strip()
         elif "</think>" in clean:
             clean = clean.split("</think>", 1)[1].strip()
-        if clean.startswith("```json"):
-            clean = clean.split("```json")[1].split("```")[0].strip()
-        elif clean.startswith("```"):
-            clean = clean.split("```")[1].split("```")[0].strip()
+            
+        # 2. Extract contents inside markdown code blocks cleanly
+        if "```" in clean:
+            blocks = re.findall(r'```(?:json)?\s*(.*?)\s*```', clean, re.DOTALL)
+            if blocks:
+                clean = blocks[0]
+            else:
+                clean = clean.replace("```json", "").replace("```", "").strip()
+
+        # 3. Locate the outermost curly braces to isolate the JSON block
         try:
-            clean = clean[clean.index("{"):clean.rindex("}") + 1]
+            start = clean.index("{")
+            end = clean.rindex("}") + 1
+            clean = clean[start:end]
         except ValueError:
             pass
-        return AgentStep.model_validate(json.loads(clean, strict=False))
+
+        # 4. Remove trailing commas inside JSON objects (invalid in strict JSON)
+        clean = re.sub(r',(\s*[}\]])', r'\1', clean)
+
+        # 5. Load the JSON with a fallback parser for common quote issues
+        try:
+            return AgentStep.model_validate(json.loads(clean, strict=False))
+        except Exception as json_err:
+            try:
+                # Fallback: attempt to convert single quoted keys and values to double quotes
+                repaired = re.sub(r"'\s*:\s*", '": ', clean)
+                repaired = re.sub(r"([{,]\s*)'", r'\1"', repaired)
+                repaired = re.sub(r":\s*'(.*?)'\s*([,}])", r': "\1" \2', repaired)
+                return AgentStep.model_validate(json.loads(repaired, strict=False))
+            except Exception:
+                raise json_err
 
     def _build_system_prompt(self) -> str:
         tool_docs = "\n".join(

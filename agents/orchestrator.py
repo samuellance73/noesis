@@ -30,9 +30,6 @@ class AgentOrchestrator:
 
     async def run_stream(self, user_input: str) -> AsyncGenerator[dict, None]:
         """Yield structured event dicts for the entire plan → execute cycle."""
-
-        # Create a trace for this request and install it into the ContextVar.
-        # Every @traced function and current_aspan() below will find it automatically.
         trace = Trace(query=user_input)
         set_current_trace(trace)
 
@@ -55,11 +52,20 @@ class AgentOrchestrator:
                 final_result  = None
                 enriched_goal = self._build_enriched_goal(milestone["goal"], results)
 
+                milestone_failed = False
                 async for step_update in executor.run_generator(enriched_goal):
                     step_update["milestone_index"] = idx
                     if step_update["event"] == "final_answer":
                         final_result = step_update["answer"]
+                    elif step_update["event"] == "error":
+                        milestone_failed = True
                     yield step_update
+
+                # FAIL FAST: Abort orchestration if the current milestone failed
+                if milestone_failed or final_result is None:
+                    logger.error(f"Aborting orchestration. Milestone {idx + 1} failed.")
+                    yield {"event": "error", "message": f"Execution aborted: Milestone {idx + 1} failed."}
+                    return
 
                 results.append({"milestone": milestone["goal"], "result": final_result})
 
@@ -86,6 +92,13 @@ class AgentOrchestrator:
             executor      = AgentExecutor(llm_service=self.llm_service, model=self.model)
             enriched_goal = self._build_enriched_goal(milestone["goal"], results)
             result        = await executor.run(enriched_goal)
+            
+            # FAIL FAST: Check if the result indicates execution failure
+            if "failed" in result.lower() or "error" in result.lower() or "limit reached" in result.lower():
+                logger.error(f"Aborting execution. Milestone {idx + 1} failed: {result}")
+                results.append({"milestone": milestone["goal"], "result": f"Aborted: Dependency failed. Error: {result}"})
+                break
+                
             results.append({"milestone": milestone["goal"], "result": result})
 
         trace.done(milestones=len(milestones))
