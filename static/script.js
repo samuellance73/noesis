@@ -148,6 +148,8 @@ async function send() {
             const dec = new TextDecoder();
             let buf = "";
 
+            let planData = null;
+
             while (true) {
                 const { value, done } = await reader.read();
                 if (done) break;
@@ -158,31 +160,66 @@ async function send() {
 
                 for (const line of lines) {
                     const t = line.trim();
+                    if (t) console.log("RAW STREAM LINE:", t);
                     if (!t || !t.startsWith("data: ")) continue;
 
                     try {
                         const eventData = JSON.parse(t.slice(6));
-                        const stepIdx = eventData.step_index;
 
-                        // Ensure local array matches current step index
+                        if (eventData.event === "planning_start") {
+                            const statusText = document.getElementById("agent-loop-status");
+                            if (statusText) statusText.textContent = "Generating Plan...";
+                            continue;
+                        }
+
+                        if (eventData.event === "plan_ready") {
+                            planData = eventData.plan;
+                            const statusText = document.getElementById("agent-loop-status");
+                            if (statusText) statusText.textContent = "Executing Plan...";
+                            continue;
+                        }
+
+                        if (eventData.event === "done") {
+                            // Final render with full results
+                            let html = `<div class="agent-steps" style="margin-top: 10px;">`;
+                            if (eventData.plan) {
+                                html += `<div class="agent-step"><div class="step-header"><span class="step-num">Agent Plan</span></div><ul style="padding-left: 20px; font-size: 14px;">`;
+                                eventData.plan.forEach(p => {
+                                    const deps = p.depends_on && p.depends_on.length > 0 ? `(Depends on: ${p.depends_on.join(', ')})` : '';
+                                    html += `<li style="margin-bottom: 4px;"><strong>Step ${p.id}:</strong> ${escapeHTML(p.goal)} <span style="color:var(--dim); font-size:0.9em;">${deps}</span></li>`;
+                                });
+                                html += `</ul></div>`;
+                            }
+                            if (eventData.results) {
+                                eventData.results.forEach((r, idx) => {
+                                    html += `<div class="agent-step"><div class="step-header"><span class="step-num">Step ${idx + 1} Result</span><span class="step-title">${escapeHTML(r.step)}</span></div><div class="step-thought">${marked.parse(r.result || "")}</div></div>`;
+                                });
+                            }
+                            html += `</div>`;
+                            updateMessageHTML(assistantIndex, html);
+                            continue;
+                        }
+
+                        if (eventData.event === "error") {
+                            throw new Error(eventData.message);
+                        }
+
+                        const stepIdx = eventData.step_index;
                         if (stepIdx !== undefined && !streamingSteps[stepIdx]) {
                             streamingSteps[stepIdx] = { step: {}, observation: null };
                         }
 
                         switch (eventData.event) {
-                            case "iteration_start":
+                            case "step_start":
                                 const statusText = document.getElementById("agent-loop-status");
-                                if (statusText) {
-                                    statusText.textContent = `Iteration ${eventData.iteration}: Reasoning...`;
-                                }
+                                if (statusText) statusText.textContent = `Executing Step ${stepIdx + 1}: ${eventData.step_goal}...`;
                                 break;
-
+                            case "iteration_start":
+                                break;
                             case "thought":
                                 streamingSteps[stepIdx].step.thought = eventData.thought;
-                                // Re-render current progress
                                 updateMessageHTML(assistantIndex, buildAgentStepsHTML(finalAnswer, streamingSteps));
                                 break;
-
                             case "tool_start":
                                 streamingSteps[stepIdx].step.tool_call = {
                                     tool_name: eventData.tool_name,
@@ -190,20 +227,15 @@ async function send() {
                                 };
                                 updateMessageHTML(assistantIndex, buildAgentStepsHTML(finalAnswer, streamingSteps));
                                 break;
-
                             case "tool_observation":
                                 streamingSteps[stepIdx].observation = eventData.observation;
                                 updateMessageHTML(assistantIndex, buildAgentStepsHTML(finalAnswer, streamingSteps));
                                 break;
-
                             case "final_answer":
-                                finalAnswer = eventData.answer;
-                                messages[assistantIndex].content = finalAnswer;
-                                updateMessageHTML(assistantIndex, buildAgentStepsHTML(finalAnswer, streamingSteps));
+                                streamingSteps[stepIdx].final_answer = eventData.answer;
+                                // We don't need to overwrite finalAnswer globally if we're running multiple steps
+                                updateMessageHTML(assistantIndex, buildAgentStepsHTML("", streamingSteps));
                                 break;
-
-                            case "error":
-                                throw new Error(eventData.message);
                         }
                     } catch (err) {
                         console.error("Parse error in stream line:", err, t);
@@ -211,7 +243,7 @@ async function send() {
                 }
             }
         } catch (e) {
-            const errText = `\n\n*Error: ${e.message}*`;
+            const errText = `\\n\\n*Error: ${e.message}*`;
             messages[assistantIndex].content = errText;
             updateMessage(assistantIndex, errText);
             setStatus(`Error: ${e.message}`);
