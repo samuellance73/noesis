@@ -13,6 +13,10 @@ logger = logging.getLogger(__name__)
 # the conversation — large observations are the primary driver of model looping.
 _MAX_OBSERVATION_CHARS = 2_000
 
+# How many iterations before the end to inject a budget-pressure reminder.
+# This nudges the model to synthesize from gathered data rather than keep calling tools.
+_BUDGET_PRESSURE_REMAINING = 2
+
 # Upstream APIs sometimes return error payloads inside a 200 OK response.
 _UPSTREAM_ERROR_PREFIXES = (
     "error:",
@@ -58,16 +62,30 @@ class AgentExecutor:
             for name, tool in tools_registry.tools.items()
         )
         return (
-            "You are an agent with access to tools. You must execute steps sequentially: "
-            "Think about what to do, select a tool, analyze the observation, and decide the next step.\n"
+            "You are an agent with access to tools. You must execute steps sequentially to solve the user's goal.\n"
+            "For each step, you must think about what to do, decide whether to call a tool or provide the final answer, and output your response.\n\n"
             f"You have access to the following tools:\n{tool_docs}\n\n"
-            "You MUST respond ONLY with a JSON object in the following format:\n"
+            "You MUST respond ONLY with a single valid JSON object containing exactly the following keys:\n"
+            '- "thought": A string representing your reasoning about the next step.\n'
+            '- "tool_call": A JSON object to call a tool, or null if you do not need to call a tool in this step.\n'
+            '- "final_answer": A string containing the final response to the user, or null if you are not finished.\n\n'
+            "You must choose to either call a tool or provide a final answer. You cannot do both in a single step.\n\n"
+            "Example 1: Calling a tool\n"
             "{\n"
-            '  "thought": "your reasoning here",\n'
-            '  "tool_call": {"tool_name": "web_search", "tool_input": "query"} or null,\n'
-            '  "final_answer": "your response to the user" or null\n'
-            "}\n"
-            "Do not include any text outside the JSON block."
+            '  "thought": "I need to look up the current weather in New York.",\n'
+            '  "tool_call": {\n'
+            '    "tool_name": "web_search",\n'
+            '    "tool_input": "New York weather"\n'
+            '  },\n'
+            '  "final_answer": null\n'
+            "}\n\n"
+            "Example 2: Providing a final answer\n"
+            "{\n"
+            '  "thought": "I have all the information needed to answer the user.",\n'
+            '  "tool_call": null,\n'
+            '  "final_answer": "The weather in New York is sunny and 72 degrees."\n'
+            "}\n\n"
+            "Ensure your output is a single valid JSON block. Do not include any text outside the JSON block."
         )
 
     async def run(self, user_input: str) -> str:
@@ -89,7 +107,21 @@ class AgentExecutor:
 
         for i in range(state.max_iterations):
             iteration_num = i + 1
+            remaining = state.max_iterations - i
             yield {"event": "iteration_start", "iteration": iteration_num}
+
+            # Inject a budget-pressure reminder once — when we first enter the
+            # final-N-iterations window — so the model synthesizes instead of
+            # continuing to call tools. The equality check avoids re-injecting
+            # the same message on every subsequent iteration in the window.
+            if remaining == _BUDGET_PRESSURE_REMAINING:
+                pressure_msg = (
+                    f"[System] You have {remaining} iteration(s) remaining. "
+                    "You MUST produce a final_answer now using the information already gathered. "
+                    "Do NOT call any more tools."
+                )
+                messages.append({"role": "user", "content": pressure_msg})
+                logger.info("Budget pressure injected: %d iteration(s) left.", remaining)
 
             async with current_aspan(f"iteration[{iteration_num}]", model=self.model) as span:
                 payload = ChatPayload(
@@ -134,7 +166,7 @@ class AgentExecutor:
                     state.steps.append({"step": parsed_step.model_dump(), "observation": None})
                     logger.info("Final answer reached after %d iteration(s).", iteration_num)
                     span.log_close(status="final_answer")
-                    yield {"event": "final_answer", "answer": parsed_step.final_answer}
+                    yield {"event": "final_answer", "answer": parsed_step.final_answer, "step_index": i}
                     return
 
                 if parsed_step.tool_call:
@@ -161,8 +193,17 @@ class AgentExecutor:
                     span.log_close(status="tool_called", tool=tool_name)
 
                 else:
-                    span.log_error("No tool call or final answer was provided.")
-                    yield {"event": "error", "message": "No tool call or final answer was provided."}
-                    break
+                    # Model returned a thought with neither a tool call nor a final answer.
+                    # Instead of aborting, reprompt with a corrective nudge so it can recover.
+                    nudge = (
+                        "Your last response did not include a tool_call or a final_answer. "
+                        "You MUST respond with a valid JSON containing either a tool_call OR a final_answer."
+                    )
+                    messages.append({"role": "user", "content": nudge})
+                    logger.warning(
+                        "Iter %d: no tool/no answer — injecting corrective nudge.",
+                        iteration_num,
+                    )
+                    span.log_error("No tool call or final answer — reprompting.")
 
         yield {"event": "error", "message": "Execution limit reached without finding a final answer."}
