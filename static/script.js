@@ -128,7 +128,8 @@ async function send() {
             </div>
         `;
 
-        // Local state to keep track of steps as they stream in
+        // streamingSteps[milestoneIdx] = array of iterations for that milestone
+        // Each iteration: { step: {thought, tool_call}, observation, final_answer }
         let streamingSteps = [];
         let finalAnswer = "";
 
@@ -149,6 +150,14 @@ async function send() {
             let buf = "";
 
             let planData = null;
+
+            // Helper: ensure streamingSteps[mIdx][iIdx] exists
+            function ensureIteration(mIdx, iIdx) {
+                if (!streamingSteps[mIdx]) streamingSteps[mIdx] = [];
+                if (!streamingSteps[mIdx][iIdx]) {
+                    streamingSteps[mIdx][iIdx] = { step: {}, observation: null, final_answer: null };
+                }
+            }
 
             while (true) {
                 const { value, done } = await reader.read();
@@ -193,15 +202,6 @@ async function send() {
                         }
 
                         if (eventData.event === "done") {
-                            // Reuse the already-populated streamingSteps so thoughts/tools/observations are preserved.
-                            // Collect each milestone's final answer from eventData.results if available.
-                            if (eventData.results) {
-                                eventData.results.forEach((r, idx) => {
-                                    if (streamingSteps[idx]) {
-                                        streamingSteps[idx].final_answer = r.result || "";
-                                    }
-                                });
-                            }
                             updateMessageHTML(assistantIndex, buildAgentStepsHTML("", streamingSteps, planData));
                             continue;
                         }
@@ -210,40 +210,41 @@ async function send() {
                             throw new Error(eventData.message);
                         }
 
-                        const stepIdx = eventData.step_index;
-                        if (stepIdx !== undefined && !streamingSteps[stepIdx]) {
-                            streamingSteps[stepIdx] = { step: {}, observation: null, milestone_index: null, milestone_goal: null };
-                        }
+                        // milestone_index = which milestone; step_index = iteration within it
+                        const mIdx = eventData.milestone_index ?? 0;
+                        const iIdx = eventData.step_index ?? 0;
 
                         switch (eventData.event) {
-                            case "step_start":
+                            case "step_start": {
                                 const statusText = document.getElementById("agent-loop-status");
-                                if (statusText) statusText.textContent = `Executing Step ${stepIdx + 1}: ${eventData.step_goal}...`;
-                                // Store milestone info for rendering
-                                if (streamingSteps[stepIdx]) {
-                                    streamingSteps[stepIdx].milestone_index = eventData.milestone_index ?? null;
-                                    streamingSteps[stepIdx].milestone_goal = eventData.milestone_goal ?? eventData.step_goal ?? null;
-                                }
+                                if (statusText) statusText.textContent = `Executing Milestone ${mIdx + 1}: ${eventData.milestone_goal}...`;
                                 break;
+                            }
                             case "iteration_start":
+                                ensureIteration(mIdx, iIdx);
+                                updateMessageHTML(assistantIndex, buildAgentStepsHTML(finalAnswer, streamingSteps, planData));
                                 break;
                             case "thought":
-                                streamingSteps[stepIdx].step.thought = eventData.thought;
+                                ensureIteration(mIdx, iIdx);
+                                streamingSteps[mIdx][iIdx].step.thought = eventData.thought;
                                 updateMessageHTML(assistantIndex, buildAgentStepsHTML(finalAnswer, streamingSteps, planData));
                                 break;
                             case "tool_start":
-                                streamingSteps[stepIdx].step.tool_call = {
+                                ensureIteration(mIdx, iIdx);
+                                streamingSteps[mIdx][iIdx].step.tool_call = {
                                     tool_name: eventData.tool_name,
                                     tool_input: eventData.tool_input
                                 };
                                 updateMessageHTML(assistantIndex, buildAgentStepsHTML(finalAnswer, streamingSteps, planData));
                                 break;
                             case "tool_observation":
-                                streamingSteps[stepIdx].observation = eventData.observation;
+                                ensureIteration(mIdx, iIdx);
+                                streamingSteps[mIdx][iIdx].observation = eventData.observation;
                                 updateMessageHTML(assistantIndex, buildAgentStepsHTML(finalAnswer, streamingSteps, planData));
                                 break;
                             case "final_answer":
-                                streamingSteps[stepIdx].final_answer = eventData.answer;
+                                ensureIteration(mIdx, iIdx);
+                                streamingSteps[mIdx][iIdx].final_answer = eventData.answer;
                                 updateMessageHTML(assistantIndex, buildAgentStepsHTML("", streamingSteps, planData));
                                 break;
                         }
@@ -361,7 +362,8 @@ function updateMessageHTML(index, html) {
 }
 
 function buildAgentStepsHTML(result, steps, planMilestones) {
-    const hasSteps = steps && steps.length > 0;
+    // steps is now 2D: steps[milestoneIdx] = array of iterations
+    const hasSteps = steps && steps.some(m => m && m.length > 0);
     const hasPlan = planMilestones && planMilestones.length > 0;
 
     if (!hasSteps && !hasPlan) {
@@ -376,17 +378,14 @@ function buildAgentStepsHTML(result, steps, planMilestones) {
             <div class="plan-overview-header">📋 Plan</div>
             <div class="plan-overview-list">`;
         planMilestones.forEach((m, i) => {
-            const stepData = steps[i];
+            const milestoneIters = steps[i]; // array of iterations for this milestone
             let statusClass = "ms-pending";
             let statusIcon = "○";
-            if (stepData) {
-                if (stepData.final_answer) {
-                    statusClass = "ms-done";
-                    statusIcon = "✓";
-                } else {
-                    statusClass = "ms-running";
-                    statusIcon = "◉";
-                }
+            if (milestoneIters && milestoneIters.length > 0) {
+                // Done if any iteration has a final_answer
+                const isDone = milestoneIters.some(iter => iter && iter.final_answer);
+                statusClass = isDone ? "ms-done" : "ms-running";
+                statusIcon = isDone ? "✓" : "◉";
             }
             html += `
             <div class="plan-milestone-row ${statusClass}">
@@ -398,72 +397,78 @@ function buildAgentStepsHTML(result, steps, planMilestones) {
         html += `</div></div>`;
     }
 
-    // ── Step Detail Cards (only for milestones that have started) ────────────
+    // ── Step Detail Cards (one group per milestone, iterations inside) ────────
     if (hasSteps) {
-        steps.forEach((s, idx) => {
-            const stepNum = idx + 1;
-            const stepData = s.step || {};
-            const thought = stepData.thought || "";
-            const toolCall = stepData.tool_call;
-            const observation = s.observation;
-            const finalAnswer = s.final_answer;
-            // Prefer authoritative planMilestones source; fall back to streamed data
-            const milestoneGoal = (planMilestones && planMilestones[idx])
-                ? planMilestones[idx].goal
-                : (s.milestone_goal || null);
+        steps.forEach((milestoneIters, mIdx) => {
+            if (!milestoneIters || milestoneIters.length === 0) return;
+            const milestoneGoal = (planMilestones && planMilestones[mIdx])
+                ? planMilestones[mIdx].goal : null;
 
-            html += `
-            <div class="agent-step">
-                <div class="step-header">
-                    <span class="step-num">Step ${stepNum}</span>
-                    ${milestoneGoal
-                    ? `<span class="step-milestone" title="${escapeHTML(milestoneGoal)}">🎯 Milestone ${stepNum}: ${escapeHTML(milestoneGoal)}</span>`
-                    : `<span class="step-title">Reasoning</span>`
+            html += `<div class="milestone-group">`;
+            if (milestoneGoal) {
+                html += `<div class="milestone-group-header">
+                    🎯 <span class="milestone-group-num">Milestone ${mIdx + 1}</span>
+                    <span class="milestone-group-goal">${escapeHTML(milestoneGoal)}</span>
+                </div>`;
+            }
+
+            milestoneIters.forEach((s, iIdx) => {
+                if (!s) return;
+                const iterNum = iIdx + 1;
+                const stepData = s.step || {};
+                const thought = stepData.thought || "";
+                const toolCall = stepData.tool_call;
+                const observation = s.observation;
+                const finalAnswer = s.final_answer;
+
+                html += `
+                <div class="agent-step">
+                    <div class="step-header">
+                        <span class="step-num">Iteration ${iterNum}</span>
+                    </div>
+                `;
+
+                if (thought) {
+                    html += `<div class="step-thought">${escapeHTML(thought)}</div>`;
                 }
-                </div>
-            `;
 
-            if (thought) {
-                html += `<div class="step-thought">${escapeHTML(thought)}</div>`;
-            }
-
-            if (toolCall) {
-                html += `
-                <div class="step-action">
-                    <span class="action-icon">⚙️</span>
-                    <span class="action-desc">Executing tool <code>${escapeHTML(toolCall.tool_name)}</code> with input: <code>${escapeHTML(JSON.stringify(toolCall.tool_input))}</code></span>
-                </div>`;
-            }
-
-            if (observation !== undefined && observation !== null) {
-                let displayObs = observation;
-                let isJson = false;
-                if (typeof observation === "string") {
-                    try {
-                        displayObs = JSON.stringify(JSON.parse(observation), null, 2);
-                        isJson = true;
-                    } catch (e) { /* raw string */ }
-                } else if (typeof observation === "object") {
-                    displayObs = JSON.stringify(observation, null, 2);
-                    isJson = true;
+                if (toolCall) {
+                    html += `
+                    <div class="step-action">
+                        <span class="action-icon">⚙️</span>
+                        <span class="action-desc">Executing tool <code>${escapeHTML(toolCall.tool_name)}</code> with input: <code>${escapeHTML(JSON.stringify(toolCall.tool_input))}</code></span>
+                    </div>`;
                 }
-                const codeClass = isJson ? ' class="language-json"' : "";
-                html += `
-                <div class="step-observation">
-                    <div class="obs-header">Observation</div>
-                    <pre><code${codeClass}>${escapeHTML(displayObs)}</code></pre>
-                </div>`;
-            }
 
-            if (finalAnswer) {
-                html += `
-                <div class="agent-final-answer">
-                    <div class="final-header">💡 Final Answer</div>
-                    <div class="final-content">${marked.parse(finalAnswer)}</div>
-                </div>`;
-            }
+                if (observation !== undefined && observation !== null) {
+                    let displayObs = observation;
+                    let isJson = false;
+                    if (typeof observation === "string") {
+                        try { displayObs = JSON.stringify(JSON.parse(observation), null, 2); isJson = true; }
+                        catch (e) { /* raw string */ }
+                    } else if (typeof observation === "object") {
+                        displayObs = JSON.stringify(observation, null, 2); isJson = true;
+                    }
+                    const codeClass = isJson ? ' class="language-json"' : "";
+                    html += `
+                    <div class="step-observation">
+                        <div class="obs-header">Observation</div>
+                        <pre><code${codeClass}>${escapeHTML(displayObs)}</code></pre>
+                    </div>`;
+                }
 
-            html += `</div>`; // Close agent-step
+                if (finalAnswer) {
+                    html += `
+                    <div class="agent-final-answer">
+                        <div class="final-header">💡 Final Answer</div>
+                        <div class="final-content">${marked.parse(finalAnswer)}</div>
+                    </div>`;
+                }
+
+                html += `</div>`; // Close agent-step
+            });
+
+            html += `</div>`; // Close milestone-group
         });
     }
 

@@ -48,7 +48,9 @@ class AgentOrchestrator:
                 final_result = None
 
                 async for step_update in executor.run_generator(milestone["goal"]):
-                    step_update["step_index"] = idx
+                    # Preserve the executor's own step_index (iteration within milestone).
+                    # Add milestone_index separately so the frontend can group correctly.
+                    step_update["milestone_index"] = idx
                     if step_update["event"] == "final_answer":
                         final_result = step_update["answer"]
                     yield step_update

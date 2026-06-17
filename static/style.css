@@ -349,6 +349,91 @@ body {
     background: rgba(255, 255, 255, 0.03);
 }
 
+/* ── Plan Overview ───────────────────────────────────────────────────────── */
+.plan-overview {
+    background: #12151e;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 16px;
+}
+
+.plan-overview-header {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--dim);
+    margin-bottom: 10px;
+}
+
+.plan-overview-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.plan-milestone-row {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    font-size: 13px;
+}
+
+.milestone-status {
+    font-size: 13px;
+    min-width: 14px;
+    text-align: center;
+    flex-shrink: 0;
+}
+
+.ms-pending .milestone-status {
+    color: var(--muted);
+}
+
+.ms-running .milestone-status {
+    color: #f5a623;
+}
+
+.ms-done .milestone-status {
+    color: #4caf78;
+}
+
+.milestone-label {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: 3px;
+    flex-shrink: 0;
+}
+
+.ms-pending .milestone-label {
+    background: rgba(255, 255, 255, 0.04);
+    color: var(--dim);
+}
+
+.ms-running .milestone-label {
+    background: rgba(245, 166, 35, 0.12);
+    color: #f5a623;
+}
+
+.ms-done .milestone-label {
+    background: rgba(76, 175, 120, 0.12);
+    color: #4caf78;
+}
+
+.milestone-text {
+    color: var(--text);
+    opacity: 0.85;
+    line-height: 1.5;
+}
+
+.ms-done .milestone-text {
+    opacity: 0.55;
+    text-decoration: line-through;
+    text-decoration-color: rgba(76, 175, 120, 0.4);
+}
+
 /* ── Agent Steps UI ──────────────────────────────────────────────────────── */
 .agent-steps {
     display: flex;
@@ -356,6 +441,44 @@ body {
     gap: 16px;
     width: 100%;
     margin-top: 8px;
+}
+
+/* ── Milestone group (wraps iterations belonging to one milestone) ───────── */
+.milestone-group {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.milestone-group-header {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    padding: 6px 12px;
+    background: rgba(79, 163, 224, 0.07);
+    border: 1px solid rgba(79, 163, 224, 0.2);
+    border-left: 3px solid var(--accent-2);
+    border-radius: 6px;
+    color: var(--text);
+}
+
+.milestone-group-num {
+    color: var(--accent-2);
+    font-family: var(--font-mono);
+    font-size: 12px;
+}
+
+.milestone-group-goal {
+    opacity: 0.85;
+    font-weight: 400;
+}
+
+/* Indent iteration cards inside the group */
+.milestone-group .agent-step {
+    margin-left: 10px;
+    border-left: 2px solid rgba(79, 163, 224, 0.18);
 }
 
 .agent-step {
