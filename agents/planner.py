@@ -1,5 +1,6 @@
 import json
 from integrations.llm.service import UpstreamService
+from utils.tracer import traced
 
 PLANNER_PROMPT = """
 You are a planning agent. Given a user goal, break it into concrete milestones.
@@ -11,6 +12,7 @@ Rules:
 - Maximum 3 milestones
 - Do not use more milestones than needed
 - Respond ONLY with valid JSON, nothing else
+- If the user input is a greeting, chit-chat, or does not require a complex multi-step plan, respond with a single milestone describing how to respond to the user.
 
 Format:
 [
@@ -20,39 +22,40 @@ Format:
 ]
 """
 
+
+@traced("planner", log_args=["goal"], log_result=False)
 async def plan(goal: str, service: UpstreamService) -> list[dict]:
     payload = {
         "model": "groq/openai/gpt-oss-120b",
         "messages": [
             {"role": "system", "content": PLANNER_PROMPT},
-            {"role": "user", "content": goal}
+            {"role": "user",   "content": f"User Goal: {goal}\n\nGenerate the plan:"},
         ],
         "temperature": 0.1,
-        "stream": False
+        "stream": False,
     }
     response = await service.get_chat_completion(payload)
-
     raw = response["choices"][0]["message"]["content"].strip()
 
-    # 1. Strip markdown code fences if present
+    # Strip markdown code fences if present
     if raw.startswith("```"):
         raw = raw.split("```")[1]
         if raw.startswith("json"):
             raw = raw[4:]
         raw = raw.strip()
 
-    # 2. Try to extract a JSON array first, then fall back to an object
+    # Try to extract a JSON array first, then fall back to an object
     if "[" in raw:
         try:
             start = raw.index("[")
-            end = raw.rindex("]") + 1
+            end   = raw.rindex("]") + 1
             milestones = json.loads(raw[start:end])
             if isinstance(milestones, list):
                 return milestones
         except (ValueError, json.JSONDecodeError):
             pass
 
-    # 3. Try parsing the whole thing as JSON (model may return {"milestones": [...]})
+    # Try parsing the whole thing as JSON
     try:
         parsed = json.loads(raw)
         if isinstance(parsed, list):

@@ -1,11 +1,12 @@
 import logging
-import os
 import httpx2
 from typing import Dict, Any, Callable
+from integrations.llm.config import settings
+from utils.tracer import traced_tool
 
 logger = logging.getLogger(__name__)
 
-# Simple tools registry
+
 class ToolRegistry:
     def __init__(self):
         self.tools: Dict[str, Callable] = {}
@@ -19,9 +20,9 @@ class ToolRegistry:
 
     async def execute(self, name: str, arg: Any) -> str:
         if name not in self.tools:
+            logger.warning("Unknown tool requested: %r  available=%s", name, list(self.tools.keys()))
             return f"Error: Tool '{name}' is not available."
         try:
-            # Handle both sync and async tools
             func = self.tools[name]
             import inspect
             if inspect.iscoroutinefunction(func):
@@ -30,17 +31,23 @@ class ToolRegistry:
                 result = func(arg)
             return str(result)
         except Exception as e:
-            logger.error(f"Error executing tool {name}: {e}")
+            logger.error("Error executing tool %r: %s", name, e, exc_info=True)
             return f"Error executing tool: {str(e)}"
+
 
 tools_registry = ToolRegistry()
 
-@tools_registry.register("web_search", description="Perform a web search using Tavily API. Useful for finding current information on the internet.")
+
+@tools_registry.register(
+    "web_search",
+    description="Perform a web search using Tavily API. Useful for finding current information on the internet.",
+)
+@traced_tool("web_search", input_arg="query")
 async def web_search(query: str) -> str:
-    tavily_api_key = os.environ.get("TAVILY_API_KEY", "")
+    tavily_api_key = settings.tavily_api_key
     if not tavily_api_key:
         return "Error: TAVILY_API_KEY is not configured."
-    
+
     url = "https://api.tavily.com/search"
     payload = {
         "api_key": tavily_api_key,
@@ -49,27 +56,20 @@ async def web_search(query: str) -> str:
         "include_answer": False,
         "include_images": False,
         "include_raw_content": False,
-        "max_results": 5
+        "max_results": 5,
     }
-    
-    try:
-        async with httpx2.AsyncClient() as client:
-            response = await client.post(url, json=payload, timeout=10.0)
-            response.raise_for_status()
-            data = response.json()
-            
-            results = data.get("results", [])
-            if not results:
-                return "No results found."
-                
-            formatted_results = []
-            for r in results:
-                title = r.get("title", "No Title")
-                url_str = r.get("url", "")
-                content = r.get("content", "No Content")
-                formatted_results.append(f"Title: {title}\nURL: {url_str}\nContent: {content}\n")
-                
-            return "\n".join(formatted_results)
-    except Exception as e:
-        logger.error(f"Tavily search error: {e}")
-        return f"Error executing search: {str(e)}"
+
+    async with httpx2.AsyncClient() as client:
+        response = await client.post(url, json=payload, timeout=10.0)
+        response.raise_for_status()
+        data = response.json()
+
+    results = data.get("results", [])
+    if not results:
+        return "No results found."
+
+    formatted = [
+        f"Title: {r.get('title', 'No Title')}\nURL: {r.get('url', '')}\nContent: {r.get('content', 'No Content')}\n"
+        for r in results
+    ]
+    return "\n".join(formatted)

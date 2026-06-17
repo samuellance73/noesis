@@ -1,4 +1,9 @@
 import logging
+from dotenv import load_dotenv
+
+# Load environment variables from .env
+load_dotenv(override=True)
+
 from contextlib import asynccontextmanager
 import httpx2
 from fastapi import FastAPI
@@ -9,8 +14,9 @@ from utils.logging_setup import setup_global_logging
 from integrations.llm.config import settings
 from interfaces.web.router import router
 
-# Write server operations and agent thoughts quietly to logs/agent.log
-setup_global_logging(console_level=logging.WARNING)
+# Show the full trace tree in the terminal at INFO level.
+# Reduce to logging.WARNING to silence the trace and keep only errors.
+setup_global_logging(console_level=logging.INFO)
 
 
 @asynccontextmanager
