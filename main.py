@@ -1,11 +1,17 @@
+import logging
 from contextlib import asynccontextmanager
 import httpx2
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 
+from utils.logging_setup import setup_global_logging
 from integrations.llm.config import settings
-from integrations.llm.router import router
+from interfaces.web.router import router
+
+# Write server operations and agent thoughts quietly to logs/agent.log
+setup_global_logging(console_level=logging.WARNING)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -41,7 +47,7 @@ app.add_middleware(
 )
 
 app.include_router(router)
-app.mount("/", StaticFiles(directory="static", html=True), name="static")
+app.mount("/", StaticFiles(directory="interfaces/web/static", html=True), name="static")
 
 if __name__ == "__main__":
     import uvicorn

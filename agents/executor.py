@@ -93,6 +93,8 @@ class AgentExecutor:
                 stream=False
             )
             
+            logger.info(f"Starting Iteration {i+1}...")
+            
             try:
                 raw_response = await self.llm_service.get_chat_completion(
                     payload.model_dump(exclude_none=True)
@@ -111,6 +113,8 @@ class AgentExecutor:
 
             messages.append({"role": "assistant", "content": assistant_content})
 
+            logger.info(f"Thought: {parsed_step.thought}")
+
             # Stream the reasoning thought to the UI
             yield {
                 "event": "thought", 
@@ -123,12 +127,15 @@ class AgentExecutor:
                     "step": parsed_step.model_dump(),
                     "observation": None
                 })
+                logger.info(f"Found Final Answer: {parsed_step.final_answer}")
                 yield {"event": "final_answer", "answer": parsed_step.final_answer}
                 return
 
             if parsed_step.tool_call:
                 tool_name = parsed_step.tool_call.tool_name
                 tool_input = parsed_step.tool_call.tool_input
+
+                logger.info(f"Calling tool '{tool_name}' with input: {tool_input}")
 
                 # Notify the UI that a tool execution is beginning
                 yield {
@@ -140,6 +147,8 @@ class AgentExecutor:
                 
                 observation = await tools_registry.execute(tool_name, tool_input)
                 
+                logger.info(f"Tool Observation (first 100 chars): {str(observation)[:100]}")
+
                 # Notify the UI with the tool's result
                 yield {
                     "event": "tool_observation", 

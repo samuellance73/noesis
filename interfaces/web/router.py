@@ -2,8 +2,8 @@ import json
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from .schemas import ChatPayload
-from .service import UpstreamService, handle_upstream_errors
+from integrations.llm.schemas import ChatPayload
+from integrations.llm.service import UpstreamService, handle_upstream_errors
 from agents.orchestrator import AgentOrchestrator
 
 router = APIRouter()

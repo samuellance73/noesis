@@ -106,22 +106,15 @@ def test_chat_non_stream_mocked_success(mock_post, client):
     mock_post.assert_called_once()
 
 
-class AsyncContextManagerMock:
-    def __init__(self, response):
-        self.response = response
-
-    async def __aenter__(self):
-        return self.response
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        pass
 
 
-@patch("httpx2.AsyncClient.stream")
-def test_chat_stream_mocked_success(mock_stream, client):
+@patch("httpx2.AsyncClient.send")
+def test_chat_stream_mocked_success(mock_send, client):
     # Mock for async response
     mock_response = MagicMock()
     mock_response.status_code = 200
+    mock_response.__aenter__ = AsyncMock(return_value=mock_response)
+    mock_response.__aexit__ = AsyncMock()
     
     # Mock the async generator for response.aiter_lines
     async def mock_aiter_lines():
@@ -134,7 +127,7 @@ def test_chat_stream_mocked_success(mock_stream, client):
             yield line
 
     mock_response.aiter_lines = mock_aiter_lines
-    mock_stream.return_value = AsyncContextManagerMock(mock_response)
+    mock_send.return_value = mock_response
 
     payload = {
         "model": "test-model",
@@ -151,15 +144,17 @@ def test_chat_stream_mocked_success(mock_stream, client):
     assert "[DONE]" in content
 
 
-@patch("httpx2.AsyncClient.stream")
-def test_chat_stream_mocked_upstream_error(mock_stream, client):
+@patch("httpx2.AsyncClient.send")
+def test_chat_stream_mocked_upstream_error(mock_send, client):
     # Mock for response that returns an error status code
     mock_response = MagicMock()
     mock_response.status_code = 500
+    mock_response.__aenter__ = AsyncMock(return_value=mock_response)
+    mock_response.__aexit__ = AsyncMock()
     
     # Mock the aread method to return bytes error
     mock_response.aread = AsyncMock(return_value=b"Internal Server Error")
-    mock_stream.return_value = AsyncContextManagerMock(mock_response)
+    mock_send.return_value = mock_response
 
     payload = {
         "model": "test-model",

@@ -85,32 +85,58 @@ async def test_agent_executor_with_tool_call():
     llm_service.get_chat_completion = AsyncMock()
     llm_service.get_chat_completion.side_effect = [mock_response_1, mock_response_2]
 
-    executor = AgentExecutor(llm_service=llm_service, model="test-model")
-    result = await executor.run("What is the weather in Paris?")
-    
-    assert result == "The weather in Paris is sunny and 22 degrees."
-    assert llm_service.get_chat_completion.call_count == 2
-    
-    # Verify the history includes the observation
-    called_payloads = [call[0][0] for call in llm_service.get_chat_completion.call_args_list]
-    
-    # The second payload messages should contain the observation from web_search
-    messages = called_payloads[1]["messages"]
-    # messages[0]: system prompt
-    # messages[1]: user prompt
-    # messages[2]: assistant thought/tool_call
-    # messages[3]: observation
-    assert "Observation from 'web_search'" in messages[3]["content"]
-    assert "Search result placeholder for: Paris weather" in messages[3]["content"]
+    # Mock the tool implementation in the registry
+    original_tool = tools_registry.tools["web_search"]
+    mock_tool = AsyncMock(return_value="Search result placeholder for: Paris weather")
+    tools_registry.tools["web_search"] = mock_tool
+
+    try:
+        executor = AgentExecutor(llm_service=llm_service, model="test-model")
+        result = await executor.run("What is the weather in Paris?")
+        
+        assert result == "The weather in Paris is sunny and 22 degrees."
+        assert llm_service.get_chat_completion.call_count == 2
+        
+        # Verify the history includes the observation
+        called_payloads = [call[0][0] for call in llm_service.get_chat_completion.call_args_list]
+        
+        # The second payload messages should contain the observation from web_search
+        messages = called_payloads[1]["messages"]
+        # messages[0]: system prompt
+        # messages[1]: user prompt
+        # messages[2]: assistant thought/tool_call
+        # messages[3]: observation
+        assert "Observation from 'web_search'" in messages[3]["content"]
+        assert "Search result placeholder for: Paris weather" in messages[3]["content"]
+    finally:
+        tools_registry.tools["web_search"] = original_tool
 
 
 def test_agent_endpoint_success(client):
     # Mock upstream client's post call, since router resolves service and calls get_chat_completion
     # which uses httpx2.AsyncClient
     with patch("httpx2.AsyncClient.post") as mock_post:
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
+        # First call (planning stage)
+        mock_response_1 = MagicMock()
+        mock_response_1.status_code = 200
+        mock_response_1.json.return_value = {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": json.dumps([
+                            {"id": 1, "goal": "Execute the task", "depends_on": []}
+                        ])
+                    }
+                }
+            ]
+        }
+        mock_response_1.raise_for_status = MagicMock()
+
+        # Second call (execution stage)
+        mock_response_2 = MagicMock()
+        mock_response_2.status_code = 200
+        mock_response_2.json.value = {
             "choices": [
                 {
                     "message": {
@@ -124,27 +150,34 @@ def test_agent_endpoint_success(client):
                 }
             ]
         }
-        mock_response.raise_for_status = MagicMock()
-        mock_post.return_value = mock_response
+        mock_response_2.json.return_value = {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": json.dumps({
+                            "thought": "Ready.",
+                            "tool_call": None,
+                            "final_answer": "Agent response content"
+                        })
+                    }
+                }
+            ]
+        }
+        mock_response_2.raise_for_status = MagicMock()
+
+        mock_post.side_effect = [mock_response_1, mock_response_2]
         
         payload = {
             "model": "test-agent-model",
-            "user_input": "Hello agent"
+            "user_input": "Hello agent",
+            "stream": False
         }
         
         response = client.post("/api/agent/run", json=payload)
         assert response.status_code == 200
         assert response.json() == {
-            "result": "Agent response content",
-            "steps": [
-                {
-                    "step": {
-                        "thought": "Ready.",
-                        "tool_call": None,
-                        "final_answer": "Agent response content"
-                    },
-                    "observation": None
-                }
-            ]
+            "milestones": [{"id": 1, "goal": "Execute the task", "depends_on": []}],
+            "results": [{"milestone": "Execute the task", "result": "Agent response content"}]
         }
-        mock_post.assert_called_once()
+        assert mock_post.call_count == 2
