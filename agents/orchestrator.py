@@ -46,8 +46,9 @@ class AgentOrchestrator:
 
                 executor = AgentExecutor(llm_service=self.llm_service, model=self.model)
                 final_result = None
+                enriched_goal = self._build_enriched_goal(milestone["goal"], results)
 
-                async for step_update in executor.run_generator(milestone["goal"]):
+                async for step_update in executor.run_generator(enriched_goal):
                     # Preserve the executor's own step_index (iteration within milestone).
                     # Add milestone_index separately so the frontend can group correctly.
                     step_update["milestone_index"] = idx
@@ -67,12 +68,32 @@ class AgentOrchestrator:
     # Non-streaming path
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Shared helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _build_enriched_goal(goal: str, prior_results: list[dict]) -> str:
+        """Prepend a summary of completed milestones so the executor has context."""
+        if not prior_results:
+            return goal
+
+        context_lines = ["Context from previously completed milestones:"]
+        for i, entry in enumerate(prior_results, start=1):
+            result_text = entry["result"] or "(no result)"
+            context_lines.append(f"  {i}. Goal: {entry['milestone']}")
+            context_lines.append(f"     Finding: {result_text}")
+        context_lines.append("")
+        context_lines.append(f"Current milestone goal: {goal}")
+        return "\n".join(context_lines)
+
     async def run(self, user_input: str) -> dict:
         """Execute the full pipeline and return a single result dict."""
         milestones = await plan(user_input, self.llm_service)
         results = []
         for milestone in milestones:
             executor = AgentExecutor(llm_service=self.llm_service, model=self.model)
-            result = await executor.run(milestone["goal"])
+            enriched_goal = self._build_enriched_goal(milestone["goal"], results)
+            result = await executor.run(enriched_goal)
             results.append({"milestone": milestone["goal"], "result": result})
         return {"milestones": milestones, "results": results}
