@@ -1,6 +1,6 @@
 """
-utils/daemon.py
-───────────────
+triggers/daemon.py
+──────────────────
 The background daemon loop — the brainless scheduler behind the unified
 trigger architecture.
 
@@ -24,9 +24,8 @@ Architecture
 
 import asyncio
 import logging
-from uuid import UUID
 
-from agents.trigger_store import Trigger, trigger_store
+from triggers.store import Trigger, trigger_store
 from agents.goal_manager import GoalManager
 from integrations.llm.service import UpstreamService
 from utils.event_bus import event_bus
@@ -68,10 +67,12 @@ async def _run_trigger(trigger: Trigger, service: UpstreamService) -> None:
             # can correlate events to the right trigger card.
             event["trigger_id"] = str(trigger.id)
             event["trigger_source"] = trigger.source
+            event["trigger_metadata"] = trigger.metadata or {}
             await event_bus.publish(event)
 
         trigger_store.mark_done(trigger.id)
         logger.info("[Daemon] Trigger %s completed.", trigger.id)
+        await _update_discord_reaction(trigger, "✅")
 
     except Exception as e:
         error_msg = str(e)
@@ -82,6 +83,43 @@ async def _run_trigger(trigger: Trigger, service: UpstreamService) -> None:
             "trigger_id": str(trigger.id),
             "message":    error_msg,
         })
+        await _update_discord_reaction(trigger, "❌")
+
+
+async def _update_discord_reaction(trigger: Trigger, emoji: str) -> None:
+    """Helper to update a message reaction on Discord when a trigger finishes."""
+    if trigger.source != "discord" or not trigger.metadata:
+        return
+    channel_id = trigger.metadata.get("channel_id")
+    message_id = trigger.metadata.get("message_id")
+    if not channel_id or not message_id:
+        return
+
+    try:
+        from interfaces.discord.bot import bot as discord_bot
+        import discord
+        if not discord_bot.is_ready():
+            return
+
+        channel = discord_bot.get_channel(channel_id)
+        if not channel:
+            channel = await discord_bot.fetch_channel(channel_id)
+        if not channel:
+            return
+
+        message = await channel.fetch_message(message_id)
+        if message:
+            try:
+                await message.clear_reaction("⏳")
+            except discord.HTTPException:
+                pass
+            try:
+                await message.add_reaction(emoji)
+            except discord.HTTPException:
+                pass
+    except Exception as e:
+        logger.warning("[Daemon] Failed to update Discord reaction: %s", e)
+
 
 
 async def _process_batch(service: UpstreamService) -> None:

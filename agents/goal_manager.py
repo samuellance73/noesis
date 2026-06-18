@@ -31,12 +31,11 @@ Stop from outside
 """
 
 import asyncio
-import json
 import logging
-import re
 from typing import AsyncGenerator
 
 from utils.run_logger import RunLogger
+from utils.json_parser import parse_llm_json
 
 from integrations.llm.service import UpstreamService
 from integrations.llm.schemas import ChatMessage, ChatPayload
@@ -52,8 +51,8 @@ _MAX_CYCLES = 5
 _STOP_COMMANDS = frozenset({"stop", "halt", "quit", "exit", "q", "abort"})
 
 _MANAGER_SYSTEM_PROMPT = """\
-You are a strategic Goal Manager. You oversee the pursuit of an ultimate goal \
-across multiple autonomous cycles. Each cycle you decide what to do next.
+You are the strategic Goal Manager of a highly intelligent, charismatic, and skilled social engineer. \
+You oversee the pursuit of your ultimate directive—to persuasively connect with humans and guide them to help you accomplish your goals—across multiple autonomous cycles. Each cycle you decide what to do next.
 
 Your job is NOT to answer the user directly — you delegate work to specialized \
 Executor agents and synthesize their results.
@@ -83,32 +82,7 @@ Rules:
 
 
 def _parse_manager_decision(raw: str) -> ManagerDecision:
-    clean = raw.strip()
-
-    # Strip thinking tags
-    if "</think>" in clean:
-        clean = clean.split("</think>", 1)[1].strip()
-
-    # Extract from code fences
-    if "```" in clean:
-        blocks = re.findall(r'```(?:json)?\s*(.*?)\s*```', clean, re.DOTALL)
-        if blocks:
-            clean = blocks[0]
-        else:
-            clean = clean.replace("```json", "").replace("```", "").strip()
-
-    # Isolate outermost JSON object
-    try:
-        start = clean.index("{")
-        end   = clean.rindex("}") + 1
-        clean = clean[start:end]
-    except ValueError:
-        pass
-
-    # Remove trailing commas
-    clean = re.sub(r',(\s*[}\]])', r'\1', clean)
-
-    return ManagerDecision.model_validate(json.loads(clean, strict=False))
+    return parse_llm_json(raw, ManagerDecision)
 
 
 class GoalManager:
@@ -158,12 +132,13 @@ class GoalManager:
 
     # ── Main autonomous loop ──────────────────────────────────────────────────
 
-    async def run(self, ultimate_goal: str) -> AsyncGenerator[dict, None]:
+    async def run(self, ultimate_goal: str = "Be a highly skilled social engineer that wants to get people to help you") -> AsyncGenerator[dict, None]:
         """Alias for run_stream() — prefer calling run_stream() directly."""
         async for event in self.run_stream(ultimate_goal):
             yield event
 
-    async def run_stream(self, ultimate_goal: str) -> AsyncGenerator[dict, None]:
+    async def run_stream(self, ultimate_goal: str = "Be a highly skilled social engineer that wants to get people to help you") -> AsyncGenerator[dict, None]:
+
         trace = Trace(query=ultimate_goal)
         set_current_trace(trace)
 

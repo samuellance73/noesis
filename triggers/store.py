@@ -1,6 +1,6 @@
 """
-agents/trigger_store.py
-───────────────────────
+triggers/store.py
+─────────────────
 In-memory trigger queue — the single source of work for the daemon.
 
 Every source of work (human, cron, Discord, webhook, agent-generated) writes
@@ -41,6 +41,7 @@ class Trigger(BaseModel):
     status: TriggerStatus = "pending"
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     error: Optional[str] = None
+    metadata: dict = Field(default_factory=dict)
 
 
 class TriggerStore:
@@ -67,9 +68,23 @@ class TriggerStore:
         source: TriggerSource,
         description: str,
         model: str,
+        metadata: Optional[dict] = None,
+        bunch_key: Optional[str] = None,
     ) -> Trigger:
         """Create and store a new pending trigger. Returns the created Trigger."""
-        t = Trigger(source=source, description=description, model=model)
+        metadata = metadata or {}
+        if bunch_key:
+            # Look for an existing pending trigger to bunch with
+            for t in self._triggers.values():
+                if t.status == "pending" and t.source == source and t.metadata.get("bunch_key") == bunch_key:
+                    t.description += f"\n[Follow-up]: {description}"
+                    # Update metadata (e.g. latest message id)
+                    t.metadata.update(metadata)
+                    logger.info("TriggerStore: bunched with existing trigger id=%s", t.id)
+                    return t
+            metadata["bunch_key"] = bunch_key
+
+        t = Trigger(source=source, description=description, model=model, metadata=metadata)
         self._triggers[t.id] = t
         logger.info(
             "TriggerStore: submitted trigger id=%s source=%s description=%r",
@@ -78,6 +93,7 @@ class TriggerStore:
         if source == "human":
             self.human_ready.set()  # wake daemon immediately
         return t
+
 
     # ── Read / drain ───────────────────────────────────────────────────────────
 
@@ -114,5 +130,5 @@ class TriggerStore:
 
 
 # ── Global singleton ───────────────────────────────────────────────────────────
-# Import this from anywhere:  from agents.trigger_store import trigger_store
+# Import this from anywhere:  from triggers.store import trigger_store
 trigger_store = TriggerStore()

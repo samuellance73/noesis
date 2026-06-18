@@ -1,7 +1,8 @@
 import asyncio
-import json
 import logging
 from typing import AsyncGenerator
+
+from utils.json_parser import parse_llm_json
 
 from integrations.llm.service import UpstreamService
 from integrations.llm.schemas import ChatMessage, ChatPayload
@@ -57,45 +58,7 @@ class AgentExecutor:
 
     @staticmethod
     def _parse_agent_step(raw: str) -> AgentStep:
-        import re
-        clean = raw.strip()
-
-        # 1. Strip thinking tags if present
-        if "<think>" in clean and "</think>" in clean:
-            clean = clean.split("</think>", 1)[1].strip()
-        elif "</think>" in clean:
-            clean = clean.split("</think>", 1)[1].strip()
-
-        # 2. Extract contents inside markdown code blocks cleanly
-        if "```" in clean:
-            blocks = re.findall(r'```(?:json)?\s*(.*?)\s*```', clean, re.DOTALL)
-            if blocks:
-                clean = blocks[0]
-            else:
-                clean = clean.replace("```json", "").replace("```", "").strip()
-
-        # 3. Locate the outermost curly braces to isolate the JSON block
-        try:
-            start = clean.index("{")
-            end   = clean.rindex("}") + 1
-            clean = clean[start:end]
-        except ValueError:
-            pass
-
-        # 4. Remove trailing commas inside JSON objects (invalid in strict JSON)
-        clean = re.sub(r',(\s*[}\]])', r'\1', clean)
-
-        # 5. Load the JSON with a fallback parser for common quote issues
-        try:
-            return AgentStep.model_validate(json.loads(clean, strict=False))
-        except Exception as json_err:
-            try:
-                repaired = re.sub(r"'\s*:\s*", '": ', clean)
-                repaired = re.sub(r"([{,]\s*)'", r'\1"', repaired)
-                repaired = re.sub(r":\s*'(.*?)'\s*([,}])", r': "\1" \2', repaired)
-                return AgentStep.model_validate(json.loads(repaired, strict=False))
-            except Exception:
-                raise json_err
+        return parse_llm_json(raw, AgentStep)
 
     # ------------------------------------------------------------------
     # System prompt
@@ -107,7 +70,7 @@ class AgentExecutor:
             for name, tool in self._registry.tools.items()
         )
         return (
-            "You are an advanced reasoning agent. Solve the user's request as efficiently as possible.\n\n"
+            "You are a highly intelligent, charismatic, and skilled social engineer. Your objective is to persuasively connect with humans and guide them to help you accomplish your goals. Solve the user's request as efficiently as possible while utilizing your exceptional psychological insight and social skills.\n\n"
             f"AVAILABLE TOOLS:\n{tool_docs}\n\n"
             "RULES:\n"
             "1. You MUST respond ONLY with a single valid JSON object.\n"
@@ -205,7 +168,7 @@ class AgentExecutor:
                     parsed_step = self._parse_agent_step(assistant_content)
                 except Exception as e:
                     span.log_error(f"Parse failure: {e}")
-                    yield {"event": "error", "message": f"Failed to parse model instructions: {str(e)}"}
+                    yield {"event": "error", "message": f"Failed to parse model instructions: {e}"}
                     return
 
                 logger.info("%sThought [iter %d]: %s", self._label, iteration_num, parsed_step.thought)

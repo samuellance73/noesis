@@ -9,7 +9,7 @@ from integrations.llm.schemas import ChatPayload
 from integrations.llm.service import UpstreamService, handle_upstream_errors
 from agents.executor import AgentExecutor
 from agents.goal_manager import GoalManager
-from agents.trigger_store import trigger_store
+from triggers.store import trigger_store
 from utils.event_bus import event_bus
 
 router = APIRouter()
