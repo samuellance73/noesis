@@ -60,7 +60,6 @@ class AgentStep(BaseModel):
 
 class AgentState(BaseModel):
     user_input: str = ""
-    history: List[dict] = []
     steps: List[dict] = []
     max_iterations: int = 5
 
@@ -76,6 +75,12 @@ class SubTask(BaseModel):
     )
 
 
+class CompletedTask(BaseModel):
+    """A sub-task that an executor has successfully answered."""
+    goal: str = Field(..., description="The sub-task goal that was executed.")
+    answer: str = Field(..., description="The executor's concrete answer for this task.")
+
+
 class GoalState(BaseModel):
     """
     Persistent state owned by the GoalManager across autonomous cycles.
@@ -85,10 +90,9 @@ class GoalState(BaseModel):
     """
     ultimate_goal: str
     progress_summary: str = ""
-    completed_tasks: List[str] = Field(default_factory=list)
-    # Parallel to completed_tasks — stores the executor's concrete answer for each task.
-    # Both lists grow together so completed_tasks[i] ↔ completed_answers[i].
-    completed_answers: List[str] = Field(default_factory=list)
+    # Completed sub-tasks with their verified answers — kept together so they
+    # can never fall out of sync.
+    completed: List[CompletedTask] = Field(default_factory=list)
     # Tasks that executors attempted but failed to produce an answer for.
     # Surfaced to the manager so it can retry, reframe, or de-prioritise them.
     failed_tasks: List[str] = Field(default_factory=list)

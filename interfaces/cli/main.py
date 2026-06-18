@@ -27,7 +27,7 @@ from rich.text import Text
 
 from integrations.llm.service import UpstreamService
 from agents.goal_manager import GoalManager
-from client import get_client
+from integrations.llm.client import get_client
 
 console = Console()
 

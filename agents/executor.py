@@ -6,7 +6,7 @@ from typing import AsyncGenerator
 from integrations.llm.service import UpstreamService
 from integrations.llm.schemas import ChatMessage, ChatPayload
 from .schemas import AgentState, AgentStep, ToolCall
-from .tools import tools_registry
+from .tools import tools_registry, ToolRegistry
 from utils.tracer import current_aspan
 
 logger = logging.getLogger(__name__)
@@ -36,12 +36,20 @@ def _is_upstream_error(content: str) -> bool:
 
 
 class AgentExecutor:
-    def __init__(self, llm_service: UpstreamService, model: str, task_label: str | None = None):
+    def __init__(
+        self,
+        llm_service: UpstreamService,
+        model: str,
+        task_label: str | None = None,
+        registry: ToolRegistry | None = None,
+    ):
         self.llm_service  = llm_service
         self.model        = model
         self.state        = AgentState()
         # Prefix injected into every log line so parallel executors are distinguishable
         self._label       = f"[{task_label}] " if task_label else ""
+        # Use the provided registry or fall back to the global default
+        self._registry    = registry or tools_registry
 
     # ------------------------------------------------------------------
     # JSON parsing
@@ -96,7 +104,7 @@ class AgentExecutor:
     def _build_system_prompt(self) -> str:
         tool_docs = "\n".join(
             f"- {name}: {tool.description}"
-            for name, tool in tools_registry.tools.items()
+            for name, tool in self._registry.tools.items()
         )
         return (
             "You are an advanced reasoning agent. Solve the user's request as efficiently as possible.\n\n"
@@ -231,7 +239,7 @@ class AgentExecutor:
                     # Execute all tools concurrently
                     async def _run_tool(tc: ToolCall) -> tuple[str, str, str]:
                         """Returns (tool_name, tool_input_repr, observation)."""
-                        obs = await tools_registry.execute(tc.tool_name, tc.tool_input)
+                        obs = await self._registry.execute(tc.tool_name, tc.tool_input)
                         if len(obs) > _MAX_OBSERVATION_CHARS:
                             extra = len(obs) - _MAX_OBSERVATION_CHARS
                             logger.warning(

@@ -42,7 +42,7 @@ from integrations.llm.service import UpstreamService
 from integrations.llm.schemas import ChatMessage, ChatPayload
 from utils.tracer import Trace, set_current_trace, current_aspan
 from .executor import AgentExecutor
-from .schemas import GoalState, ManagerDecision, SubTask
+from .schemas import GoalState, ManagerDecision, SubTask, CompletedTask
 
 logger = logging.getLogger("noesis.goal_manager")
 
@@ -127,9 +127,15 @@ class GoalManager:
         await manager.inject_input("stop")  # from stdin listener
     """
 
-    def __init__(self, llm_service: UpstreamService, model: str):
+    def __init__(
+        self,
+        llm_service: UpstreamService,
+        model: str,
+        max_cycles: int = _MAX_CYCLES,
+    ):
         self.llm_service  = llm_service
         self.model        = model
+        self.max_cycles   = max_cycles
         self._stop_event  = asyncio.Event()
         self._input_queue: asyncio.Queue[str] = asyncio.Queue()
 
@@ -153,11 +159,9 @@ class GoalManager:
     # ── Main autonomous loop ──────────────────────────────────────────────────
 
     async def run(self, ultimate_goal: str) -> AsyncGenerator[dict, None]:
-        """
-        Yield structured event dicts for the entire autonomous loop.
-        The caller (router / CLI) is responsible for framing/displaying them.
-        """
-        raise NotImplementedError("Use run_stream() instead.")
+        """Alias for run_stream() — prefer calling run_stream() directly."""
+        async for event in self.run_stream(ultimate_goal):
+            yield event
 
     async def run_stream(self, ultimate_goal: str) -> AsyncGenerator[dict, None]:
         trace = Trace(query=ultimate_goal)
@@ -169,7 +173,7 @@ class GoalManager:
         yield {"event": "goal_set", "goal": ultimate_goal}
         logger.info("GoalManager: starting autonomous loop. goal=%r", ultimate_goal)
 
-        for cycle in range(1, _MAX_CYCLES + 1):
+        for cycle in range(1, self.max_cycles + 1):
             if self._stop_event.is_set():
                 logger.info("GoalManager: stop signal received before cycle %d.", cycle)
                 yield {"event": "stopped", "cycle": cycle, "reason": "stop_requested"}
@@ -314,8 +318,7 @@ class GoalManager:
                         yield ev  # pass-through all executor events to caller
                     if result:
                         successful_findings.append(f"Sub-task: {task_goal}\nResult: {result}")
-                        goal_state.completed_tasks.append(task_goal)
-                        goal_state.completed_answers.append(str(result))
+                        goal_state.completed.append(CompletedTask(goal=task_goal, answer=str(result)))
                         # Clear from failed list if it previously failed and now succeeded
                         if task_goal in goal_state.failed_tasks:
                             goal_state.failed_tasks.remove(task_goal)
@@ -349,14 +352,14 @@ class GoalManager:
             # ── 5. Stream progress to caller ──────────────────────────────
             run_log.log_cycle_complete(
                 progress=decision.progress_update,
-                completed=goal_state.completed_tasks,
+                completed=[t.goal for t in goal_state.completed],
                 failed=goal_state.failed_tasks,
             )
             yield {
                 "event":            "cycle_complete",
                 "cycle":            cycle,
                 "progress_update":  decision.progress_update,
-                "completed_tasks":  goal_state.completed_tasks,
+                "completed_tasks":  [t.goal for t in goal_state.completed],
                 "open_questions":   goal_state.open_questions,
             }
 
@@ -366,23 +369,23 @@ class GoalManager:
                 logger.info("GoalManager: goal declared complete after %d cycle(s).", cycle)
                 final = decision.final_answer or decision.progress_update
                 run_log.log_final_answer(final or "(no final answer text)")
-                run_log.log_complete(cycles=cycle, tasks=len(goal_state.completed_tasks))
-                trace.done(cycles=cycle, tasks=len(goal_state.completed_tasks))
+                run_log.log_complete(cycles=cycle, tasks=len(goal_state.completed))
+                trace.done(cycles=cycle, tasks=len(goal_state.completed))
                 yield {
                     "event":        "goal_complete",
                     "cycle":        cycle,
                     "final_answer": final,
-                    "completed_tasks": goal_state.completed_tasks,
+                    "completed_tasks": [t.goal for t in goal_state.completed],
                 }
                 return
 
         # Reached max cycles without completion
         if not goal_state.is_complete:
-            logger.warning("GoalManager: max cycles (%d) reached without goal completion.", _MAX_CYCLES)
-            run_log.log_error(f"Max cycles ({_MAX_CYCLES}) reached without completing the goal.")
+            logger.warning("GoalManager: max cycles (%d) reached without goal completion.", self.max_cycles)
+            run_log.log_error(f"Max cycles ({self.max_cycles}) reached without completing the goal.")
             yield {
                 "event":   "error",
-                "message": f"Autonomous loop reached the cycle limit ({_MAX_CYCLES}) without completing the goal.",
+                "message": f"Autonomous loop reached the cycle limit ({self.max_cycles}) without completing the goal.",
                 "summary": goal_state.progress_summary,
             }
 
@@ -400,12 +403,12 @@ class GoalManager:
         if state.progress_summary:
             lines += ["PROGRESS SO FAR (verified results only):", state.progress_summary, ""]
 
-        if state.completed_tasks:
+        if state.completed:
             lines.append("COMPLETED TASKS WITH VERIFIED ANSWERS:")
-            for task, answer in zip(state.completed_tasks, state.completed_answers):
-                lines.append(f"  ✓ {task}")
+            for ct in state.completed:
+                lines.append(f"  ✓ {ct.goal}")
                 # Truncate very long answers to keep the prompt manageable
-                answer_preview = answer[:500] + (" …[truncated]" if len(answer) > 500 else "")
+                answer_preview = ct.answer[:500] + (" …[truncated]" if len(ct.answer) > 500 else "")
                 lines.append(f"    → {answer_preview}")
             lines.append("")
 

@@ -18,6 +18,7 @@ const dom = {
     chatModeBtn: $("chatModeBtn"),
     agentModeBtn: $("agentModeBtn"),
     goalModeBtn: $("goalModeBtn"),
+    triggerModeBtn: $("triggerModeBtn"),
 };
 
 function setMode(mode) {
@@ -31,7 +32,12 @@ function setMode(mode) {
         setStatus("");
     }
     currentMode = mode;
-    const btns = { chat: dom.chatModeBtn, agent: dom.agentModeBtn, goal: dom.goalModeBtn };
+    const btns = {
+        chat: dom.chatModeBtn,
+        agent: dom.agentModeBtn,
+        goal: dom.goalModeBtn,
+        trigger: dom.triggerModeBtn,
+    };
     Object.entries(btns).forEach(([k, b]) => {
         b.classList.toggle("active", k === mode);
         b.setAttribute("aria-checked", k === mode ? "true" : "false");
@@ -40,6 +46,7 @@ function setMode(mode) {
         chat: "Ask anything…",
         agent: "Enter a request for the single-turn agent…",
         goal: "Set an ultimate goal — the agent will work autonomously until done…",
+        trigger: "Queue a task for the background daemon — returns immediately, runs async…",
     };
     dom.chatInput.placeholder = placeholders[mode];
 }
@@ -160,6 +167,8 @@ async function send() {
 
     if (currentMode === "goal") {
         await runGoalMode(text, model, assistantIndex);
+    } else if (currentMode === "trigger") {
+        await runTriggerMode(text, model, assistantIndex);
     } else if (currentMode === "agent") {
         await runAgentMode(text, model, assistantIndex);
     } else {
@@ -177,6 +186,93 @@ async function stopGoal() {
     isGenerating = false;
     setSendState(false);
     setStatus("Stopped.");
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TRIGGER MODE — queue a task to the background daemon
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Shared SSE connection to the trigger stream (persists across trigger submissions)
+let triggerStreamReader = null;
+let triggerStreamActive = false;
+
+async function ensureTriggerStream() {
+    if (triggerStreamActive) return;
+    triggerStreamActive = true;
+
+    const res = await fetch("/api/triggers/stream");
+    if (!res.ok) { triggerStreamActive = false; return; }
+
+    // Stream events into the global event bus — find the right card by trigger_id
+    (async () => {
+        try {
+            for await (const ev of readSSE(res)) {
+                if (ev.event === "connected") continue;
+                const tid = ev.trigger_id;
+                if (!tid) continue;
+                const state = triggerStates[tid];
+                if (!state) continue;
+                handleGoalEvent(ev, state.goalState, state.assistantIndex);
+                if (ev.event === "goal_complete" || ev.event === "trigger_failed") {
+                    state.goalState.stopped = true;
+                }
+            }
+        } catch { }
+        triggerStreamActive = false;
+    })();
+}
+
+// Map of trigger_id → { goalState, assistantIndex }
+const triggerStates = {};
+
+async function runTriggerMode(description, model, assistantIndex) {
+    renderMessage("assistant", "", assistantIndex);
+
+    // POST to queue the trigger — returns immediately
+    let triggerId;
+    try {
+        const res = await fetch("/api/triggers", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ description, model }),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        triggerId = data.trigger_id;
+    } catch (e) {
+        updateMessage(assistantIndex, `*Error queuing trigger: ${e.message}*`);
+        isGenerating = false;
+        setSendState(false);
+        return;
+    }
+
+    // Register state for this trigger so stream handler can find it
+    const goalState = {
+        cycles: [],
+        finalAnswer: null,
+        stopped: false,
+        goalText: description,
+    };
+    triggerStates[triggerId] = { goalState, assistantIndex };
+
+    // Show a "queued" card immediately
+    updateMessageHTML(assistantIndex,
+        `<div class="goal-container">
+          <div class="goal-header">
+            <span class="goal-icon">📋</span>
+            <span class="goal-title">${escapeHTML(description)}</span>
+          </div>
+          <div class="cycle-thought"><span class="label">⏳</span>Queued — daemon will pick this up shortly…</div>
+        </div>`
+    );
+
+    // Ensure the shared SSE stream is running
+    await ensureTriggerStream();
+
+    // Return control to the UI immediately — results stream in via ensureTriggerStream
+    isGenerating = false;
+    setSendState(false);
+    setStatus("");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -509,4 +605,5 @@ document.addEventListener("DOMContentLoaded", () => {
     dom.chatModeBtn.addEventListener("click", () => setMode("chat"));
     dom.agentModeBtn.addEventListener("click", () => setMode("agent"));
     dom.goalModeBtn.addEventListener("click", () => setMode("goal"));
+    dom.triggerModeBtn.addEventListener("click", () => setMode("trigger"));
 });

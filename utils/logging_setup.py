@@ -31,7 +31,7 @@ def setup_global_logging(console_level=logging.WARNING):
     agent_formatter = logging.Formatter(
         "%(asctime)s [%(levelname)s] %(name)s (%(filename)s:%(lineno)d): %(message)s"
     )
-    agent_handler = logging.FileHandler("logs/agent.log", encoding="utf-8")
+    agent_handler = logging.FileHandler("logs/agent.log", mode="w", encoding="utf-8")
     agent_handler.setLevel(logging.INFO)
     agent_handler.setFormatter(agent_formatter)
     root_logger.addHandler(agent_handler)
@@ -47,7 +47,7 @@ def setup_global_logging(console_level=logging.WARNING):
     tracer_logger.handlers = []          # ← prevents duplicate lines on reload
 
     trace_formatter = logging.Formatter("%(message)s")
-    trace_handler = logging.FileHandler("logs/trace.log", encoding="utf-8")
+    trace_handler = logging.FileHandler("logs/trace.log", mode="w", encoding="utf-8")
     trace_handler.setLevel(logging.INFO)
     trace_handler.setFormatter(trace_formatter)
 
@@ -59,12 +59,24 @@ def setup_global_logging(console_level=logging.WARNING):
     gm_logger.handlers = []              # prevent duplicate lines on reload
 
     gm_formatter = logging.Formatter("%(asctime)s  %(message)s", datefmt="%H:%M:%S")
-    gm_handler = logging.FileHandler("logs/goal_manager.log", encoding="utf-8")
+    gm_handler = logging.FileHandler("logs/goal_manager.log", mode="w", encoding="utf-8")
     gm_handler.setLevel(logging.INFO)
     gm_handler.setFormatter(gm_formatter)
 
     gm_logger.addHandler(gm_handler)
     gm_logger.propagate = True           # still flows to root → agent.log
+
+    # ── 4. daemon.log — Background daemon lifecycle events ────────────────────
+    daemon_logger = logging.getLogger("noesis.daemon")
+    daemon_logger.handlers = []          # prevent duplicate lines on reload
+
+    daemon_formatter = logging.Formatter("%(asctime)s  %(message)s", datefmt="%H:%M:%S")
+    daemon_handler = logging.FileHandler("logs/daemon.log", mode="w", encoding="utf-8")
+    daemon_handler.setLevel(logging.DEBUG)   # DEBUG so poll ticks are visible
+    daemon_handler.setFormatter(daemon_formatter)
+
+    daemon_logger.addHandler(daemon_handler)
+    daemon_logger.propagate = True       # still flows to root → agent.log
 
     # ── 4. Console — Configurable level, clean short format ───────────────────
     console_formatter = logging.Formatter("[%(levelname)s] %(name)s: %(message)s")
