@@ -628,3 +628,230 @@ body {
         transform: rotate(360deg);
     }
 }
+
+/* ── Stop button ─────────────────────────────────────────────────────────── */
+#stopBtn {
+    background: #c0392b;
+    border: none;
+    color: #fff;
+    width: 32px;
+    height: 32px;
+    border-radius: 7px;
+    cursor: pointer;
+    font-size: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: opacity 0.15s, background 0.15s;
+    flex-shrink: 0;
+}
+
+#stopBtn:hover {
+    background: #a93226;
+}
+
+/* ── Goal Mode container ─────────────────────────────────────────────────── */
+.goal-container {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    width: 100%;
+}
+
+.goal-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 14px;
+    background: rgba(124, 106, 247, 0.1);
+    border: 1px solid rgba(124, 106, 247, 0.28);
+    border-left: 4px solid var(--accent);
+    border-radius: 8px;
+    font-weight: 600;
+    font-size: 14px;
+}
+
+.goal-icon {
+    font-size: 16px;
+}
+
+.goal-title {
+    color: var(--text);
+}
+
+/* ── Cycle card ──────────────────────────────────────────────────────────── */
+.goal-cycle {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.cycle-running {
+    border-color: rgba(245, 166, 35, 0.35);
+}
+
+.cycle-done {
+    border-color: rgba(76, 175, 120, 0.28);
+}
+
+.cycle-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 14px;
+    background: #12151e;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.cycle-running .cycle-header {
+    background: rgba(245, 166, 35, 0.06);
+}
+
+.cycle-done .cycle-header {
+    background: rgba(76, 175, 120, 0.06);
+}
+
+.cycle-badge {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+}
+
+.cycle-running .cycle-badge {
+    color: #f5a623;
+}
+
+.cycle-done .cycle-badge {
+    color: #4caf78;
+}
+
+.cycle-progress {
+    font-weight: 400;
+    color: var(--dim);
+    font-size: 12.5px;
+    font-style: italic;
+}
+
+.cycle-thought {
+    display: flex;
+    gap: 8px;
+    padding: 10px 14px;
+    font-size: 13.5px;
+    color: var(--text);
+    opacity: 0.9;
+    border-bottom: 1px solid var(--border);
+    background: #0f1219;
+}
+
+.cycle-thought .label {
+    flex-shrink: 0;
+}
+
+/* ── Task rows ───────────────────────────────────────────────────────────── */
+.cycle-tasks {
+    display: flex;
+    flex-direction: column;
+    padding: 10px 14px;
+    gap: 8px;
+}
+
+.task-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+}
+
+.task-status {
+    flex-shrink: 0;
+    font-size: 13px;
+}
+
+.task-running .task-status {
+    color: #f5a623;
+}
+
+.task-done .task-status {
+    color: #4caf78;
+}
+
+.task-goal {
+    color: var(--text);
+    opacity: 0.85;
+}
+
+.task-done .task-goal {
+    opacity: 0.6;
+}
+
+.task-answer {
+    margin-left: 24px;
+    padding: 8px 12px;
+    background: rgba(124, 106, 247, 0.06);
+    border-left: 3px solid rgba(124, 106, 247, 0.3);
+    border-radius: 0 6px 6px 0;
+    font-size: 13.5px;
+    line-height: 1.65;
+}
+
+/* ── Goal final answer ───────────────────────────────────────────────────── */
+.goal-final {
+    background: rgba(76, 175, 120, 0.08);
+    border: 1px solid rgba(76, 175, 120, 0.28);
+    border-left: 4px solid #4caf78;
+    border-radius: 8px;
+    padding: 16px;
+}
+
+.goal-final-header {
+    font-size: 14px;
+    font-weight: 600;
+    color: #4caf78;
+    margin-bottom: 8px;
+}
+
+.goal-final-content {
+    font-size: 14.5px;
+    line-height: 1.7;
+}
+
+.goal-stopped {
+    color: var(--dim);
+    font-size: 13px;
+    font-family: var(--font-mono);
+    padding: 8px 0;
+}
+
+.goal-error {
+    color: #e74c3c;
+    font-size: 13px;
+    padding: 8px 12px;
+    background: rgba(231, 76, 60, 0.08);
+    border-radius: 6px;
+    border: 1px solid rgba(231, 76, 60, 0.2);
+}
+
+/* ── Inline small spinner (task rows) ────────────────────────────────────── */
+.spinner-sm {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border: 2px solid rgba(255, 255, 255, 0.1);
+    border-top-color: #f5a623;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    vertical-align: middle;
+}
+
+.agent-thinking {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--dim);
+    font-size: 13.5px;
+    font-family: var(--font-mono);
+}

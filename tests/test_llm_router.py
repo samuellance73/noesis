@@ -221,14 +221,18 @@ def test_live_proxy_chat_completion(client):
     models_data = models_response.json()
     assert "data" in models_data and len(models_data["data"]) > 0
     
-    # Find the first valid model that is not a wildcard and not a guard/moderation model
+    # Find the first valid model that is not a wildcard, guard, or whisper/audio model
     model_name = next(
         (m["id"] for m in models_data["data"] 
-         if "*" not in m["id"] and "guard" not in m["id"].lower()), 
+         if "*" not in m["id"] 
+         and "guard" not in m["id"].lower()
+         and "whisper" not in m["id"].lower()
+         and "audio" not in m["id"].lower()
+         and "speech" not in m["id"].lower()), 
         None
     )
     if not model_name:
-        pytest.skip("No concrete non-guard models found, skipping live chat test")
+        pytest.skip("No concrete non-guard chat models found, skipping live chat test")
         
     print(f"\nTesting live chat completion with model: {model_name}")
 

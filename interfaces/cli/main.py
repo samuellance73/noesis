@@ -1,96 +1,185 @@
+"""
+interfaces/cli/main.py
+──────────────────────
+Terminal interface for the autonomous GoalManager loop.
+
+Usage
+─────
+  python run_cli.py
+
+Lifecycle
+─────────
+  1. User enters the ultimate goal.
+  2. GoalManager starts its autonomous loop in a background task.
+  3. A foreground input listener reads stdin and feeds messages into the manager.
+  4. Typing "stop", "quit", "exit", or pressing Ctrl-C halts the loop gracefully.
+  5. Any other text is injected as a goal refinement mid-run.
+"""
+
+import asyncio
 import sys
 import os
+
 from rich.console import Console
 from rich.panel import Panel
-from rich.table import Table
+from rich.rule import Rule
+from rich.text import Text
 
 from integrations.llm.service import UpstreamService
-from agents.planner import plan
-from agents.executor import AgentExecutor
+from agents.goal_manager import GoalManager
 from client import get_client
 
 console = Console()
 
-async def run_terminal_interface():
-    # 1. Initialize our connection "Outlet" (HTTP client) using the shared client module
-    async with get_client(timeout=45.0) as client:
+_STOP_HINT = "[dim]Type [bold]stop[/bold] to stop · any other text refines the goal[/dim]"
+
+
+def _render_event(event: dict) -> None:
+    """Pretty-print a single GoalManager event to the terminal."""
+    ev = event.get("event")
+
+    if ev == "goal_set":
+        console.print(Rule(f"[bold purple]🎯 Goal Set[/bold purple]"))
+        console.print(f"[bold]{event['goal']}[/bold]\n")
+
+    elif ev == "cycle_start":
+        console.print(Rule(f"[cyan]Cycle {event['cycle']}[/cyan]", style="cyan"))
+
+    elif ev == "manager_thought":
+        console.print(f"[yellow]🧠 Manager:[/yellow] [italic]{event['thought']}[/italic]")
+
+    elif ev == "spawning_tasks":
+        count = event["count"]
+        console.print(f"[magenta]⚡ Spawning {count} executor(s) in parallel:[/magenta]")
+        for t in event.get("tasks", []):
+            console.print(f"   [dim]→ {t}[/dim]")
+
+    elif ev == "iteration_start":
+        task_goal = event.get("task_goal", "")
+        label = f" [{task_goal[:40]}]" if task_goal else ""
+        console.print(f"[dim]  ↻ Executor iter {event['iteration']}{label}[/dim]")
+
+    elif ev == "thought":
+        console.print(f"[yellow]  Thought:[/yellow] [italic]{event['thought']}[/italic]")
+
+    elif ev == "tool_start":
+        console.print(
+            f"[cyan]  ⚙  {event['tool_name']}[/cyan] ← [dim]{str(event['tool_input'])[:80]}[/dim]"
+        )
+
+    elif ev == "tool_observation":
+        obs = event.get("observation", "")
+        cropped = obs if len(obs) < 300 else f"{obs[:300]}… [cropped]"
+        console.print(f"[grey50]  Obs:[/grey50] {cropped}\n")
+
+    elif ev == "final_answer":
+        # This is an executor's result for a sub-task
+        task_goal = event.get("task_goal", "sub-task")
+        console.print(
+            Panel(
+                event["answer"],
+                title=f"[green]✓ {task_goal[:60]}[/green]",
+                border_style="green",
+            )
+        )
+
+    elif ev == "cycle_complete":
+        console.print(f"\n[bold blue]📊 Cycle {event['cycle']} complete:[/bold blue] {event['progress_update']}")
+        if event.get("open_questions"):
+            console.print("[dim]  Open questions:[/dim]")
+            for q in event["open_questions"]:
+                console.print(f"  [dim]? {q}[/dim]")
+        console.print()
+
+    elif ev == "user_input_received":
+        console.print(f"[bold green]↩ Injected:[/bold green] {event['message']}")
+
+    elif ev == "goal_complete":
+        console.print(Rule("[bold green]✅ Goal Complete[/bold green]", style="green"))
+        if event.get("final_answer"):
+            console.print(
+                Panel(event["final_answer"], title="Final Answer", border_style="bright_green")
+            )
+        console.print(f"[dim]Completed in {event['cycle']} cycle(s).[/dim]")
+
+    elif ev == "stopped":
+        console.print(f"\n[bold red]⏹  Stopped[/bold red] (cycle {event['cycle']}): {event.get('reason', '')}")
+
+    elif ev == "error":
+        console.print(f"[bold red]❌ Error:[/bold red] {event.get('message', event)}")
+        if event.get("summary"):
+            console.print(Panel(event["summary"], title="Progress so far", border_style="yellow"))
+
+
+async def _input_listener(manager: GoalManager) -> None:
+    """
+    Reads lines from stdin without blocking the event loop.
+    Each line is forwarded to manager.inject_input().
+    Exits when the manager's stop event fires or EOF is reached.
+    """
+    loop = asyncio.get_running_loop()
+    while not manager._stop_event.is_set():
+        try:
+            line = await loop.run_in_executor(None, sys.stdin.readline)
+        except Exception:
+            break
+        if not line:        # EOF (e.g. pipe closed)
+            break
+        text = line.strip()
+        if text:
+            await manager.inject_input(text)
+            if manager._stop_event.is_set():
+                break
+
+
+async def run_terminal_interface() -> None:
+    default_model = os.getenv("AGENT_MODEL", "groq/openai/gpt-oss-120b")
+
+    async with get_client(timeout=60.0) as client:
         service = UpstreamService(client)
-        
-        console.print(Panel("[bold purple]Noesis CLI Agent Client Ready[/bold purple]", expand=False))
-        
-        # Get default model from environment or fallback to groq/openai/gpt-oss-120b
-        default_model = os.getenv("AGENT_MODEL", "groq/openai/gpt-oss-120b")
-        
+
+        console.print(
+            Panel(
+                "[bold purple]Noesis — Autonomous Agent[/bold purple]\n"
+                "[dim]Set an ultimate goal and let the agent work autonomously.\n"
+                "Inject refinements at any time. Type [bold]stop[/bold] to halt.[/dim]",
+                expand=False,
+            )
+        )
+
         while True:
+            # ── Get ultimate goal ──────────────────────────────────────
             try:
-                # Prompt the user for input
-                user_input = console.input("\n[bold blue]User > [/bold blue]").strip()
-                if not user_input:
-                    continue
-                if user_input.lower() in ["exit", "quit"]:
-                    console.print("[bold red]Goodbye![/bold red]")
-                    break
-                
-                # --- PHASE 1: Planning ---
-                console.print("\n[bold magenta]🧠 Generating Task Plan...[/bold magenta]")
-                steps = await plan(user_input, service)
-                
-                # Print the generated plan as a clean table
-                table = Table(title="Execution Roadmap")
-                table.add_column("Step ID", justify="center", style="cyan")
-                table.add_column("Sub-Goal", style="green")
-                table.add_column("Depends On", justify="center", style="yellow")
-                
-                for step in steps:
-                    deps = ", ".join(map(str, step.get("depends_on", []))) or "None"
-                    table.add_row(str(step["id"]), step["goal"], deps)
-                console.print(table)
-                
-                # --- PHASE 2: Step-by-Step Execution ---
-                results = []
-                for idx, step in enumerate(steps):
-                    console.print(f"\n[bold purple]🚀 [Step {idx+1}/{len(steps)}] Executing: {step['goal']}[/bold purple]")
-                    
-                    # Context Injection
-                    step_input = step["goal"]
-                    if results:
-                        context_str = "Context of completed steps:\n"
-                        for prev in results:
-                            context_str += f"- Task: {prev['step']}\n  Result: {prev['result']}\n\n"
-                        step_input = f"{context_str}Current Task: {step_input}"
-                    
-                    # Create a fresh, isolated Executor for this sub-task
-                    executor = AgentExecutor(llm_service=service, model=default_model)
-                    final_result = None
-                    
-                    # Stream and print step updates in real-time
-                    async for event in executor.run_generator(step_input):
-                        if event["event"] == "iteration_start":
-                            console.print(f"[dim]  --- Iteration {event['iteration']} ---[/dim]")
-                            
-                        elif event["event"] == "thought":
-                            console.print(f"[yellow]  Thought:[/yellow] [italic]{event['thought']}[/italic]")
-                            
-                        elif event["event"] == "tool_start":
-                            console.print(f"[cyan]  ⚙️  Calling tool [bold]{event['tool_name']}[/bold] with input:[/cyan] {event['tool_input']}")
-                            
-                        elif event["event"] == "tool_observation":
-                            # Crop long observations to avoid terminal flooding
-                            obs_text = event["observation"]
-                            cropped = obs_text if len(obs_text) < 400 else f"{obs_text[:400]}... [cropped]"
-                            console.print(f"[grey50]  Observation Result:[/grey50]\n{cropped}\n")
-                            
-                        elif event["event"] == "final_answer":
-                            final_result = event["answer"]
-                            console.print(Panel(final_result, title=f"Step {idx+1} Complete", border_style="green"))
-                            
-                        elif event["event"] == "error":
-                            console.print(f"[bold red]❌ Step Error: {event['message']}[/bold red]")
-                    
-                    results.append({"step": step["goal"], "result": final_result})
-                    
-                # Final complete summary
-                console.print("\n[bold green]✅ ALL TASKS COMPLETE![/bold green]")
-                
+                goal = console.input("\n[bold blue]Goal > [/bold blue]").strip()
+            except (EOFError, KeyboardInterrupt):
+                console.print("\n[bold red]Goodbye![/bold red]")
+                break
+
+            if not goal:
+                continue
+            if goal.lower() in ("exit", "quit", "stop"):
+                console.print("[bold red]Goodbye![/bold red]")
+                break
+
+            manager = GoalManager(llm_service=service, model=default_model)
+
+            console.print(f"\n{_STOP_HINT}\n")
+
+            # ── Run manager loop + input listener concurrently ─────────
+            async def stream_events():
+                async for event in manager.run_stream(goal):
+                    _render_event(event)
+
+            try:
+                await asyncio.gather(
+                    stream_events(),
+                    _input_listener(manager),
+                )
+            except KeyboardInterrupt:
+                manager.request_stop()
+                console.print("\n[bold red]Interrupted — stopping agent.[/bold red]")
             except Exception as e:
-                console.print(f"[bold red]System Error: {str(e)}[/bold red]")
+                console.print(f"[bold red]System error: {e}[/bold red]")
+
+            console.print(Rule(style="dim"))
+            console.print("[dim]Agent loop ended. Enter a new goal or type exit.[/dim]")

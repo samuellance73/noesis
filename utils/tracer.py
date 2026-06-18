@@ -70,13 +70,15 @@ def _clip(value: Any, max_len: int = 120) -> str:
     return s if len(s) <= max_len else s[:max_len] + f"… [+{len(s) - max_len}]"
 
 
-# ─── ContextVar: the active trace for the current async task ────────────────
+# ─── ContextVars: trace state for the current async task context ─────────────
 _active_trace: ContextVar["Trace | None"] = ContextVar("_active_trace", default=None)
+_depth_stack_var: ContextVar[list[Span] | None] = ContextVar("_depth_stack_var", default=None)
 
 
 def set_current_trace(trace: "Trace") -> None:
     """Call once per request in the orchestrator to make the trace available everywhere."""
     _active_trace.set(trace)
+    _depth_stack_var.set([])
 
 
 def get_current_trace() -> "Trace | None":
@@ -123,18 +125,27 @@ class Trace:
         self.query    = query
         self.id       = trace_id or uuid.uuid4().hex[:8]
         self.start    = time.perf_counter()
-        self._depth_stack: list[Span] = []
+        _depth_stack_var.set([])
         logger.info(
             f"{_FMT_TRACE} id={self.id}\n│\n│  Query: {_clip(query, 160)}\n│"
         )
 
+    def _get_stack(self) -> list[Span]:
+        stack = _depth_stack_var.get()
+        if stack is None:
+            stack = []
+            _depth_stack_var.set(stack)
+        return stack
+
     def _depth(self) -> int:
-        return len(self._depth_stack)
+        return len(self._get_stack())
 
     @contextmanager
     def span(self, name: str, **open_kwargs):
-        s = Span(name=name, depth=self._depth())
-        self._depth_stack.append(s)
+        stack = list(self._get_stack())
+        s = Span(name=name, depth=len(stack))
+        stack.append(s)
+        token = _depth_stack_var.set(stack)
         s.log_open(**open_kwargs)
         try:
             yield s
@@ -142,12 +153,14 @@ class Trace:
             s.log_error(str(exc))
             raise
         finally:
-            self._depth_stack.pop()
+            _depth_stack_var.reset(token)
 
     @asynccontextmanager
     async def aspan(self, name: str, **open_kwargs):
-        s = Span(name=name, depth=self._depth())
-        self._depth_stack.append(s)
+        stack = list(self._get_stack())
+        s = Span(name=name, depth=len(stack))
+        stack.append(s)
+        token = _depth_stack_var.set(stack)
         s.log_open(**open_kwargs)
         try:
             yield s
@@ -155,7 +168,7 @@ class Trace:
             s.log_error(str(exc))
             raise
         finally:
-            self._depth_stack.pop()
+            _depth_stack_var.reset(token)
 
     def done(self, **kwargs: Any) -> None:
         extras = "  ".join(f"{k}={_clip(v)}" for k, v in kwargs.items())
