@@ -33,8 +33,13 @@ from utils.event_bus import event_bus
 logger = logging.getLogger("noesis.daemon")
 
 # Daemon runs the GoalManager with a tighter cycle cap than interactive use.
-# A triggered task is expected to be concrete enough that 1–3 cycles suffice.
-_DAEMON_MAX_CYCLES = 3
+# A triggered task is expected to be concrete enough that 1–5 cycles suffice.
+_DAEMON_MAX_CYCLES = 5
+
+# Minimum wall-clock time per cycle for daemon-triggered tasks.
+# Prevents the agent from spamming 3 cycles back-to-back (e.g., 3 Discord
+# messages in 8 seconds). Set to None to disable pacing.
+_DAEMON_CYCLE_INTERVAL: float | None = 60.0
 
 
 async def _run_trigger(trigger: Trigger, service: UpstreamService) -> None:
@@ -59,6 +64,7 @@ async def _run_trigger(trigger: Trigger, service: UpstreamService) -> None:
         llm_service=service,
         model=trigger.model,
         max_cycles=_DAEMON_MAX_CYCLES,
+        cycle_interval_seconds=_DAEMON_CYCLE_INTERVAL,
     )
 
     try:

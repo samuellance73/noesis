@@ -81,6 +81,19 @@ class CompletedTask(BaseModel):
     answer: str = Field(..., description="The executor's concrete answer for this task.")
 
 
+class FailedTask(BaseModel):
+    """A sub-task that an executor attempted but could not answer."""
+    goal: str = Field(..., description="The sub-task goal that failed.")
+    attempts: int = Field(1, description="How many times this task has been attempted.")
+    give_up_after: int = Field(2, description="Stop retrying once attempts reaches this value.")
+    last_error: str = Field("", description="Last error or failure reason (if available).")
+
+    @property
+    def is_abandoned(self) -> bool:
+        """True when the retry budget is exhausted — manager should re-plan around this."""
+        return self.attempts >= self.give_up_after
+
+
 class GoalState(BaseModel):
     """
     Persistent state owned by the GoalManager across autonomous cycles.
@@ -94,8 +107,8 @@ class GoalState(BaseModel):
     # can never fall out of sync.
     completed: List[CompletedTask] = Field(default_factory=list)
     # Tasks that executors attempted but failed to produce an answer for.
-    # Surfaced to the manager so it can retry, reframe, or de-prioritise them.
-    failed_tasks: List[str] = Field(default_factory=list)
+    # Surfaced to the manager so it can retry, reframe, or permanently abandon them.
+    failed_tasks: List[FailedTask] = Field(default_factory=list)
     open_questions: List[str] = Field(default_factory=list)
     cycle: int = 0
     is_complete: bool = False

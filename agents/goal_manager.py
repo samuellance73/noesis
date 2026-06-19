@@ -41,12 +41,16 @@ from integrations.llm.service import UpstreamService
 from integrations.llm.schemas import ChatMessage, ChatPayload
 from utils.tracer import Trace, set_current_trace, current_aspan
 from .executor import AgentExecutor
-from .schemas import GoalState, ManagerDecision, SubTask, CompletedTask
+from .schemas import GoalState, ManagerDecision, SubTask, CompletedTask, FailedTask
 
 logger = logging.getLogger("noesis.goal_manager")
 
 # Safety cap — even a fully autonomous agent shouldn't run forever.
 _MAX_CYCLES = 5
+
+# Hard timeout for the parallel subtask batch within a single cycle.
+# A stuck tool call (network hang, infinite loop) will be cancelled after this.
+_CYCLE_TIMEOUT_SECONDS = 120
 
 _STOP_COMMANDS = frozenset({"stop", "halt", "quit", "exit", "q", "abort"})
 
@@ -106,11 +110,13 @@ class GoalManager:
         llm_service: UpstreamService,
         model: str,
         max_cycles: int = _MAX_CYCLES,
+        cycle_interval_seconds: float | None = None,
     ):
-        self.llm_service  = llm_service
-        self.model        = model
-        self.max_cycles   = max_cycles
-        self._stop_event  = asyncio.Event()
+        self.llm_service            = llm_service
+        self.model                  = model
+        self.max_cycles             = max_cycles
+        self.cycle_interval_seconds = cycle_interval_seconds  # min wall-time per cycle
+        self._stop_event            = asyncio.Event()
         self._input_queue: asyncio.Queue[str] = asyncio.Queue()
 
     # ── Stop control ──────────────────────────────────────────────────────────
@@ -154,6 +160,7 @@ class GoalManager:
                 yield {"event": "stopped", "cycle": cycle, "reason": "stop_requested"}
                 break
 
+            cycle_start_time = asyncio.get_event_loop().time()
             goal_state.cycle = cycle
             run_log.log_cycle_start(cycle)
             yield {"event": "cycle_start", "cycle": cycle}
@@ -284,22 +291,54 @@ class GoalManager:
                     subtask_coroutines.append(
                         _run_subtask(task, len(subtask_coroutines), goal_state.task_counter)
                     )
-                all_results = await asyncio.gather(*subtask_coroutines)
+
+                try:
+                    all_results = await asyncio.wait_for(
+                        asyncio.gather(*subtask_coroutines, return_exceptions=True),
+                        timeout=_CYCLE_TIMEOUT_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    logger.error(
+                        "GoalManager [cycle %d]: subtask batch timed out after %ds — aborting cycle.",
+                        cycle, _CYCLE_TIMEOUT_SECONDS,
+                    )
+                    yield {
+                        "event":   "error",
+                        "message": f"Cycle {cycle} subtasks timed out after {_CYCLE_TIMEOUT_SECONDS}s. "
+                                   "The daemon will retry on the next trigger.",
+                        "cycle":   cycle,
+                    }
+                    break
 
                 # Stream executor events and collect findings
                 successful_findings: list[str] = []
-                for task_goal, result, events in all_results:
+                for item in all_results:
+                    # return_exceptions=True means individual failures arrive as exceptions
+                    if isinstance(item, BaseException):
+                        logger.error("GoalManager [cycle %d]: subtask raised: %s", cycle, item)
+                        continue
+                    task_goal, result, events = item
                     for ev in events:
                         yield ev  # pass-through all executor events to caller
                     if result:
                         successful_findings.append(f"Sub-task: {task_goal}\nResult: {result}")
                         goal_state.completed.append(CompletedTask(goal=task_goal, answer=str(result)))
-                        # Clear from failed list if it previously failed and now succeeded
-                        if task_goal in goal_state.failed_tasks:
-                            goal_state.failed_tasks.remove(task_goal)
+                        # Remove from failed list if it previously failed and now succeeded
+                        goal_state.failed_tasks = [
+                            f for f in goal_state.failed_tasks if f.goal != task_goal
+                        ]
                     else:
-                        if task_goal not in goal_state.failed_tasks:
-                            goal_state.failed_tasks.append(task_goal)
+                        existing = next(
+                            (f for f in goal_state.failed_tasks if f.goal == task_goal), None
+                        )
+                        if existing:
+                            existing.attempts += 1
+                            logger.warning(
+                                "GoalManager [cycle %d]: task %r failed again (attempt %d/%d).",
+                                cycle, task_goal, existing.attempts, existing.give_up_after,
+                            )
+                        else:
+                            goal_state.failed_tasks.append(FailedTask(goal=task_goal))
 
                 # Append *successful* findings to the progress summary (executor-owned).
                 # Failed tasks are tracked separately via goal_state.failed_tasks
@@ -328,7 +367,7 @@ class GoalManager:
             run_log.log_cycle_complete(
                 progress=decision.progress_update,
                 completed=[t.goal for t in goal_state.completed],
-                failed=goal_state.failed_tasks,
+                failed=[f.goal for f in goal_state.failed_tasks],
             )
             yield {
                 "event":            "cycle_complete",
@@ -353,6 +392,22 @@ class GoalManager:
                     "completed_tasks": [t.goal for t in goal_state.completed],
                 }
                 return
+
+            # ── 7. Enforce minimum cycle interval (pacing) ────────────────
+            if self.cycle_interval_seconds and cycle < self.max_cycles:
+                elapsed  = asyncio.get_event_loop().time() - cycle_start_time
+                throttle = self.cycle_interval_seconds - elapsed
+                if throttle > 0:
+                    logger.info(
+                        "GoalManager [cycle %d] finished in %.1fs — sleeping %.1fs to meet %ds interval.",
+                        cycle, elapsed, throttle, self.cycle_interval_seconds,
+                    )
+                    yield {
+                        "event":     "cycle_throttle",
+                        "cycle":     cycle,
+                        "sleep_for": round(throttle, 1),
+                    }
+                    await asyncio.sleep(throttle)
 
         # Reached max cycles without completion
         if not goal_state.is_complete:
@@ -388,14 +443,24 @@ class GoalManager:
             lines.append("")
 
         if state.failed_tasks:
-            lines.append("FAILED TASKS (executor ran but produced NO answer — do NOT assume these are done):")
-            for t in state.failed_tasks:
-                lines.append(f"  ✗ {t}")
-            lines.append(
-                "  → These tasks are too abstract for the executor. Break each into smaller,"
-                " concrete, tool-actionable sub-tasks, or reframe them with a specific deliverable."
-            )
-            lines.append("")
+            retryable  = [f for f in state.failed_tasks if not f.is_abandoned]
+            abandoned  = [f for f in state.failed_tasks if f.is_abandoned]
+
+            if retryable:
+                lines.append("FAILED TASKS (retryable — break into smaller, concrete sub-tasks):")
+                for f in retryable:
+                    lines.append(f"  ✗ {f.goal}  [attempt {f.attempts}/{f.give_up_after}]")
+                lines.append(
+                    "  → These tasks are too abstract. Break each into smaller,"
+                    " concrete, tool-actionable sub-tasks with a specific deliverable."
+                )
+                lines.append("")
+
+            if abandoned:
+                lines.append("PERMANENTLY BLOCKED (do NOT retry — re-plan around these):")
+                for f in abandoned:
+                    lines.append(f"  ✗ {f.goal}  [gave up after {f.attempts} attempt(s)]")
+                lines.append("")
 
         if state.open_questions:
             lines.append("OPEN QUESTIONS:")
