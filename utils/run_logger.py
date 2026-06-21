@@ -46,6 +46,10 @@ _HEAVY = "═" * 72
 _LIGHT = "─" * 72
 _W     = 70   # text wrap width
 
+# Maximum number of run directories to keep under logs/runs/.
+# When a new run is created and the total exceeds this, the oldest are deleted.
+_MAX_RUNS = 10
+
 
 def _now() -> str:
     return datetime.datetime.now().strftime("%H:%M:%S")
@@ -67,6 +71,26 @@ def _wrap(text: str, indent: int = 2) -> str:
         initial_indent=prefix,
         subsequent_indent=prefix,
     )
+
+
+def _prune_old_runs(runs_dir: pathlib.Path, max_runs: int = _MAX_RUNS) -> None:
+    """
+    Delete the oldest run directories under `runs_dir` so that at most
+    `max_runs` directories remain.  Directories are sorted lexicographically
+    on their name, which starts with a YYYYMMDD_HHMMSS timestamp, so the
+    oldest sort first.
+    """
+    import shutil
+    existing = sorted(
+        (p for p in runs_dir.iterdir() if p.is_dir()),
+        key=lambda p: p.name,
+    )
+    to_delete = existing[:max(0, len(existing) - max_runs)]
+    for old_dir in to_delete:
+        try:
+            shutil.rmtree(old_dir)
+        except Exception:
+            pass  # best-effort — don't crash the logger if pruning fails
 
 
 # ─── RunLogger ───────────────────────────────────────────────────────────────
@@ -92,8 +116,12 @@ class RunLogger:
 
     def __init__(self, goal: str, run_id: str) -> None:
         ts        = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.run_dir = pathlib.Path("logs") / "runs" / f"{ts}_{run_id}"
+        runs_root = pathlib.Path("logs") / "runs"
+        self.run_dir = runs_root / f"{ts}_{run_id}"
         self.run_dir.mkdir(parents=True, exist_ok=True)
+
+        # Prune oldest runs — keep at most _MAX_RUNS directories
+        _prune_old_runs(runs_root)
 
         self._f: TextIO = (self.run_dir / "_manager.log").open("w", encoding="utf-8")
         self._start     = time.perf_counter()

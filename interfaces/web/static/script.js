@@ -212,9 +212,9 @@ async function ensureTriggerStream() {
                 if (!tid) continue;
                 const state = triggerStates[tid];
                 if (!state) continue;
-                handleGoalEvent(ev, state.goalState, state.assistantIndex);
-                if (ev.event === "goal_complete" || ev.event === "trigger_failed") {
-                    state.goalState.stopped = true;
+                handleTriggerEvent(ev, state.steps, state.assistantIndex);
+                if (ev.event === "final_answer" || ev.event === "error" || ev.event === "trigger_failed") {
+                    state.done = true;
                 }
             }
         } catch { }
@@ -222,7 +222,7 @@ async function ensureTriggerStream() {
     })();
 }
 
-// Map of trigger_id → { goalState, assistantIndex }
+// Map of trigger_id → { steps, assistantIndex, done }
 const triggerStates = {};
 
 async function runTriggerMode(description, model, assistantIndex) {
@@ -247,22 +247,15 @@ async function runTriggerMode(description, model, assistantIndex) {
     }
 
     // Register state for this trigger so stream handler can find it
-    const goalState = {
-        cycles: [],
-        finalAnswer: null,
-        stopped: false,
-        goalText: description,
-    };
-    triggerStates[triggerId] = { goalState, assistantIndex };
+    const steps = [];  // same schema as agent mode steps[]
+    triggerStates[triggerId] = { steps, assistantIndex, done: false };
 
     // Show a "queued" card immediately
     updateMessageHTML(assistantIndex,
-        `<div class="goal-container">
-          <div class="goal-header">
-            <span class="goal-icon">📋</span>
-            <span class="goal-title">${escapeHTML(description)}</span>
+        `<div class="agent-steps">
+          <div class="agent-step">
+            <div class="step-thought">⏳ Queued — daemon will pick this up shortly…</div>
           </div>
-          <div class="cycle-thought"><span class="label">⏳</span>Queued — daemon will pick this up shortly…</div>
         </div>`
     );
 
@@ -273,6 +266,41 @@ async function runTriggerMode(description, model, assistantIndex) {
     isGenerating = false;
     setSendState(false);
     setStatus("");
+}
+
+function handleTriggerEvent(ev, steps, assistantIndex) {
+    function ensureStep(iIdx) {
+        while (steps.length <= iIdx) steps.push({ thought: "", toolCalls: [], observation: null, finalAnswer: null, error: null });
+    }
+    const iIdx = ev.step_index ?? 0;
+
+    switch (ev.event) {
+        case "trigger_started":
+            // Already shown the queued card — no extra step needed
+            break;
+        case "thought":
+            ensureStep(iIdx);
+            steps[iIdx].thought = ev.thought;
+            break;
+        case "tool_start":
+            ensureStep(iIdx);
+            steps[iIdx].toolCalls.push({ tool_name: ev.tool_name, tool_input: ev.tool_input });
+            break;
+        case "tool_observation":
+            ensureStep(iIdx);
+            steps[iIdx].observation = ev.observation;
+            break;
+        case "final_answer":
+            ensureStep(iIdx);
+            steps[iIdx].finalAnswer = ev.answer;
+            break;
+        case "error":
+        case "trigger_failed":
+            ensureStep(iIdx);
+            steps[iIdx].error = ev.message || "Unknown error";
+            break;
+    }
+    updateMessageHTML(assistantIndex, buildAgentHTML(steps));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -535,6 +563,9 @@ function buildAgentHTML(steps) {
                 <div class="final-header">💡 Final Answer</div>
                 <div class="final-content">${marked.parse(s.finalAnswer)}</div>
             </div>`;
+        }
+        if (s.error) {
+            html += `<div class="goal-error">❌ ${escapeHTML(s.error)}</div>`;
         }
         html += `</div>`;
     });

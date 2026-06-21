@@ -79,7 +79,20 @@ async def web_search(query: str) -> str:
 
 @tools_registry.register(
     "python_execute",
-    description="Execute arbitrary Python 3 code in a separate process. Write code that prints output to stdout. The return value is the standard output of the process. Standard libraries are available, and you can also import installed packages.",
+    description=(
+        "Execute arbitrary Python 3 code in a separate process and capture the stdout output. "
+        "Standard libraries and pre-installed packages are fully available.\n\n"
+        
+        "INSTALLED LIBRARIES TO USE:\n"
+        "- 'PyGithub' (import as: from github import Github) is installed. Use this for all GitHub-related tasks.\n"
+        "- 'requests' and 'httpx' are installed for any raw API requests.\n\n"
+        
+        "AVAILABLE SECRET KEYS (ENVIRONMENT VARIABLES):\n"
+        "You can read these secret keys securely inside your Python code using 'os.environ.get(...)'. "
+        "Do NOT hardcode keys in your written code; always fetch them dynamically:\n"
+        "- os.environ.get('GITHUB_TOKEN') is pre-loaded with your GitHub access token.\n"
+        "- os.environ.get('TELEGRAM_BOT_TOKEN') is pre-loaded with your Telegram bot key."
+    ),
 )
 @traced_tool("python_execute", input_arg="code")
 async def python_execute(code: str) -> str:

@@ -8,16 +8,26 @@ Responsibilities (and ONLY these):
   1. Wake up periodically (poll interval)
   2. Immediately wake when a human trigger arrives (fast-lane)
   3. Drain all pending triggers from TriggerStore
-  4. For each trigger: launch GoalManager.run_stream() as a background task
-  5. Publish all GoalManager events to the EventBus so SSE clients receive them
+  4. Route each trigger to the right agent and run it
+  5. Publish all agent events to the EventBus so SSE clients receive them
   6. Update trigger status (processing → done/failed)
 
-The daemon has ZERO intelligence. It does not decide what to do — that is
-GoalManager's job. It only moves triggers from the queue into GoalManager.
+Routing strategy
+────────────────
+  • source == "human"    →  GoalManager
+      The human operator sends intentional, potentially complex tasks.
+      GoalManager breaks them into sub-tasks, runs multiple cycles, and
+      writes full human-readable logs under logs/runs/.
+
+  • source == "executor" →  AgentExecutor  (operator fast-path via "!" prefix)
+  • source == "discord"  →  AgentExecutor  (neutral user replies)
+  • source == "cron" / "webhook" / etc.  →  AgentExecutor
+      Simple, single-turn responses. Lightweight, no logging overhead.
 
 Architecture
 ────────────
-  TriggerStore (pending) ──► Daemon ──► GoalManager ──► EventBus ──► SSE clients
+  TriggerStore (pending) ──► Daemon ──► GoalManager   (human)    ──► EventBus ──► SSE
+                                   └──► AgentExecutor (all else) ──► EventBus ──► SSE
                                    ↑
                          human_ready.Event (fast-lane, no sleep needed)
 """
@@ -26,26 +36,28 @@ import asyncio
 import logging
 
 from triggers.store import Trigger, trigger_store
+from agents.executor import AgentExecutor
 from agents.goal_manager import GoalManager
 from integrations.llm.service import UpstreamService
 from utils.event_bus import event_bus
 
 logger = logging.getLogger("noesis.daemon")
 
-# Daemon runs the GoalManager with a tighter cycle cap than interactive use.
-# A triggered task is expected to be concrete enough that 1–5 cycles suffice.
+# GoalManager cycle cap for daemon-triggered human runs.
 _DAEMON_MAX_CYCLES = 5
 
-# Minimum wall-clock time per cycle for daemon-triggered tasks.
-# Prevents the agent from spamming 3 cycles back-to-back (e.g., 3 Discord
-# messages in 8 seconds). Set to None to disable pacing.
+# Minimum wall-clock seconds per cycle — prevents the agent from hammering
+# the API in rapid succession. Set to None to disable pacing.
 _DAEMON_CYCLE_INTERVAL: float | None = 60.0
+
+# AgentExecutor iteration cap for non-human (neutral/cron/webhook) triggers.
+_DAEMON_MAX_ITERATIONS = 5
 
 
 async def _run_trigger(trigger: Trigger, service: UpstreamService) -> None:
     """
-    Run one trigger through a GoalManager, publishing all events to the bus.
-    Updates trigger status when done.
+    Route one trigger to the appropriate agent, stream events to the bus,
+    and update the trigger status when done.
     """
     logger.info(
         "[Daemon] Starting trigger id=%s source=%s: %r",
@@ -60,21 +72,11 @@ async def _run_trigger(trigger: Trigger, service: UpstreamService) -> None:
         "description": trigger.description,
     })
 
-    manager = GoalManager(
-        llm_service=service,
-        model=trigger.model,
-        max_cycles=_DAEMON_MAX_CYCLES,
-        cycle_interval_seconds=_DAEMON_CYCLE_INTERVAL,
-    )
-
     try:
-        async for event in manager.run_stream(trigger.description):
-            # Tag every event with the trigger that produced it so the frontend
-            # can correlate events to the right trigger card.
-            event["trigger_id"] = str(trigger.id)
-            event["trigger_source"] = trigger.source
-            event["trigger_metadata"] = trigger.metadata or {}
-            await event_bus.publish(event)
+        if trigger.source == "human":
+            await _run_as_goal_manager(trigger, service)
+        else:
+            await _run_as_executor(trigger, service)
 
         trigger_store.mark_done(trigger.id)
         logger.info("[Daemon] Trigger %s completed.", trigger.id)
@@ -90,6 +92,43 @@ async def _run_trigger(trigger: Trigger, service: UpstreamService) -> None:
             "message":    error_msg,
         })
         await _update_discord_reaction(trigger, "❌")
+
+
+async def _run_as_goal_manager(trigger: Trigger, service: UpstreamService) -> None:
+    """
+    Human-operator path: full GoalManager loop with sub-task decomposition,
+    multi-cycle reasoning, and human-readable run logs under logs/runs/.
+    """
+    manager = GoalManager(
+        llm_service=service,
+        model=trigger.model,
+        max_cycles=_DAEMON_MAX_CYCLES,
+        cycle_interval_seconds=_DAEMON_CYCLE_INTERVAL,
+    )
+    async for event in manager.run_stream(trigger.description):
+        event["trigger_id"]       = str(trigger.id)
+        event["trigger_source"]   = trigger.source
+        event["trigger_metadata"] = trigger.metadata or {}
+        await event_bus.publish(event)
+
+
+async def _run_as_executor(trigger: Trigger, service: UpstreamService) -> None:
+    """
+    Non-human path: lightweight single-turn AgentExecutor — no multi-cycle
+    overhead, no run logs written to disk.
+    """
+    from agents.schemas import AgentState
+    executor = AgentExecutor(
+        llm_service=service,
+        model=trigger.model,
+        task_label=f"trigger-{str(trigger.id)[:8]}",
+    )
+    executor.state = AgentState(max_iterations=_DAEMON_MAX_ITERATIONS)
+    async for event in executor.run_generator(trigger.description):
+        event["trigger_id"]       = str(trigger.id)
+        event["trigger_source"]   = trigger.source
+        event["trigger_metadata"] = trigger.metadata or {}
+        await event_bus.publish(event)
 
 
 async def _update_discord_reaction(trigger: Trigger, emoji: str) -> None:

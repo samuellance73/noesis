@@ -4,7 +4,7 @@ triggers/store.py
 In-memory trigger queue — the single source of work for the daemon.
 
 Every source of work (human, cron, Discord, webhook, agent-generated) writes
-a Trigger here. The daemon drains it periodically and fires a GoalManager run
+a Trigger here. The daemon drains it periodically and fires an AgentExecutor run
 for each pending trigger.
 
 Design notes
@@ -29,7 +29,7 @@ from pydantic import BaseModel, Field
 
 logger = logging.getLogger("noesis.trigger_store")
 
-TriggerSource = Literal["human", "cron", "discord", "webhook", "agent"]
+TriggerSource = Literal["human", "executor", "cron", "discord", "webhook", "agent"]
 TriggerStatus = Literal["pending", "processing", "done", "failed"]
 
 
@@ -90,8 +90,8 @@ class TriggerStore:
             "TriggerStore: submitted trigger id=%s source=%s description=%r",
             t.id, t.source, t.description[:80],
         )
-        if source == "human":
-            self.human_ready.set()  # wake daemon immediately
+        if source in ("human", "executor"):
+            self.human_ready.set()  # wake daemon immediately for operator triggers
         return t
 
 
