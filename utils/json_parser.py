@@ -79,6 +79,9 @@ def parse_llm_json(raw: str, schema: Type[T]) -> T:
     """
     clean = _clean_llm_json(raw)
 
+    if not clean:
+        raise ValueError("No JSON content found in your response (only reasoning/thinking blocks). You MUST output the JSON object after your thinking block.")
+
     try:
         return schema.model_validate(json.loads(clean, strict=False))
     except Exception as json_err:

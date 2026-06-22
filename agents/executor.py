@@ -153,8 +153,14 @@ class AgentExecutor:
 
                 if not assistant_content:
                     logger.warning("Iteration %d: model returned empty/null content — likely a thinking-only response.", iteration_num)
-                    yield {"event": "error", "message": "Model returned no content (possible thinking-only response). Try a different model."}
-                    return
+                    nudge = (
+                        "Your last response was completely empty. "
+                        "You MUST respond with a valid JSON block containing your 'thought', 'tool_calls', and 'final_answer'."
+                    )
+                    messages.append({"role": "user", "content": nudge})
+                    span.log_error("Empty content — reprompting.")
+                    yield {"event": "warning", "message": "Empty content — reprompting."}
+                    continue
 
                 # Detect upstream error payloads returned inside a 200 OK body
                 if _is_upstream_error(assistant_content):
@@ -167,9 +173,15 @@ class AgentExecutor:
                 try:
                     parsed_step = self._parse_agent_step(assistant_content)
                 except Exception as e:
+                    logger.warning("Iteration %d: parse failure: %s", iteration_num, e)
                     span.log_error(f"Parse failure: {e}")
-                    yield {"event": "error", "message": f"Failed to parse model instructions: {e}"}
-                    return
+                    nudge = (
+                        f"Your last response failed to parse as valid JSON. Error: {e}\n"
+                        "You MUST respond ONLY with a single valid JSON object containing your 'thought', 'tool_calls', and 'final_answer'."
+                    )
+                    messages.append({"role": "user", "content": nudge})
+                    yield {"event": "warning", "message": f"Failed to parse model instructions: {e}"}
+                    continue
 
                 logger.info("%sThought [iter %d]: %s", self._label, iteration_num, parsed_step.thought)
                 yield {"event": "thought", "thought": parsed_step.thought, "step_index": i}

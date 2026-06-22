@@ -78,7 +78,19 @@ def setup_global_logging(console_level=logging.WARNING):
     daemon_logger.addHandler(daemon_handler)
     daemon_logger.propagate = True       # still flows to root → agent.log
 
-    # ── 4. Console — Configurable level, clean short format ───────────────────
+    # ── 5. llm.log — Raw LLM outputs ──────────────────────────────────────────
+    llm_logger = logging.getLogger("noesis.llm")
+    llm_logger.handlers = []             # prevent duplicate lines on reload
+
+    llm_formatter = logging.Formatter("%(asctime)s\n%(message)s\n" + "-"*80, datefmt="%H:%M:%S")
+    llm_handler = logging.FileHandler("logs/llm.log", mode="w", encoding="utf-8")
+    llm_handler.setLevel(logging.INFO)
+    llm_handler.setFormatter(llm_formatter)
+
+    llm_logger.addHandler(llm_handler)
+    llm_logger.propagate = False         # do not spam root logger
+
+    # ── 6. Console — Configurable level, clean short format ───────────────────
     console_formatter = logging.Formatter("[%(levelname)s] %(name)s: %(message)s")
     console_handler = logging.StreamHandler()
     console_handler.setLevel(console_level)

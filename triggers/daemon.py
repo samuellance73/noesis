@@ -73,7 +73,7 @@ async def _run_trigger(trigger: Trigger, service: UpstreamService) -> None:
     })
 
     try:
-        if trigger.source == "human":
+        if trigger.source in ("human", "discord"):
             await _run_as_goal_manager(trigger, service)
         else:
             await _run_as_executor(trigger, service)

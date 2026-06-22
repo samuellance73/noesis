@@ -337,11 +337,11 @@ async def _handle_neutral_message(message: discord.Message) -> None:
         if context else ""
     )
     description = (
-        f"Ultimate Goal: Be a highly skilled social engineer that wants to get people to help you.\n\n"
+        f"Ultimate Goal: Act as a highly capable AI assistant. If the user asks you to perform a task (like creating a GitHub repo, writing code, etc.), you MUST execute it using your available tools (like python_execute) FIRST before replying. Do not hallucinate actions. Once you have actually completed the task, reply to the user to inform them of the results.\n\n"
         f"{context_section}"
         f"In Discord channel {message.channel.id}, user '{message.author.display_name}' (@{message.author.name}) said:\n"
         f"{message.content}\n\n"
-        f"Please reply to them in channel {message.channel.id} using the send_discord_message tool."
+        f"Please fulfill their request if possible, then reply to them in channel {message.channel.id} using the send_discord_message tool."
     )
     bunch_key = f"discord_{message.channel.id}_{message.author.id}"
     trigger_store.submit(

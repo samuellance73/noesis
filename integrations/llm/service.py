@@ -12,7 +12,18 @@ from tenacity import (
     RetryError,
 )
 
+import json
+
 logger = logging.getLogger(__name__)
+llm_logger = logging.getLogger("noesis.llm")
+
+def _format_messages(payload: dict) -> str:
+    lines = [f"Model: {payload.get('model', 'unknown')}"]
+    for m in payload.get('messages', []):
+        role = str(m.get('role', 'unknown')).upper()
+        content = str(m.get('content', '')).strip()
+        lines.append(f"[{role}]\n{content}\n")
+    return "\n".join(lines)
 
 
 def _is_retryable(exc: BaseException) -> bool:
@@ -71,9 +82,20 @@ class UpstreamService:
     @retry(**_retry_policy)
     async def get_chat_completion(self, payload: dict) -> dict:
         """Raw httpx exceptions bubble out so @retry can act on them."""
+        llm_logger.info("=== LLM Request ===\n" + _format_messages(payload))
         response = await self.client.post("chat/completions", json=payload)
         response.raise_for_status()
-        return response.json()
+        data = response.json()
+        
+        res_lines = []
+        for c in data.get('choices', []):
+            msg = c.get('message', {})
+            role = str(msg.get('role', 'ASSISTANT')).upper()
+            content = str(msg.get('content', '')).strip()
+            res_lines.append(f"[{role}]\n{content}")
+            
+        llm_logger.info("=== LLM Response ===\n" + "\n\n".join(res_lines))
+        return data
 
     async def stream_chat_completion(self, payload: dict) -> AsyncGenerator[str, None]:
         """Stream chat completions with pre-connect retries.
@@ -82,6 +104,8 @@ class UpstreamService:
         would cause duplicate tokens, so once we start yielding we let any
         error surface naturally.
         """
+        llm_logger.info("=== LLM Stream Request ===\n" + _format_messages(payload))
+
         @retry(**{**_retry_policy, "stop": stop_after_attempt(3)})
         async def _open_stream():
             """Raises on non-200 so tenacity can retry the connection."""
@@ -102,9 +126,12 @@ class UpstreamService:
         try:
             response = await _open_stream()
             async with response:
+                full_stream = []
                 async for line in response.aiter_lines():
                     if line:
                         yield f"{line}\n"
+                        full_stream.append(line)
+                llm_logger.info("=== LLM Streamed Response ===\n" + "".join(full_stream))
         except RetryError as exc:
             logger.error(f"Stream connect failed after retries: {exc}")
             yield f"data: {{\"error\": \"Upstream unavailable after retries.\"}}\n\n"
