@@ -223,3 +223,30 @@ async def send_discord_message(payload_json: str) -> str:
         return f"Success: Message sent to channel {channel_id}."
     except Exception as e:
         return f"Error sending message: {e}"
+
+
+def build_specialized_registry(executor_type_str: str) -> ToolRegistry:
+    """
+    Creates a new ToolRegistry containing only the tools relevant to the specified executor profile.
+    This limits tool availability for specialized agents (e.g. Synthesis agents have no tools).
+    """
+    from .schemas import ExecutorType
+    try:
+        executor_type = ExecutorType(executor_type_str)
+    except ValueError:
+        executor_type = ExecutorType.FULL
+
+    registry = ToolRegistry()
+    if executor_type == ExecutorType.RESEARCH:
+        if "web_search" in tools_registry.tools:
+            registry.tools["web_search"] = tools_registry.tools["web_search"]
+    elif executor_type == ExecutorType.CODE:
+        for name in ["python_execute", "run_command"]:
+            if name in tools_registry.tools:
+                registry.tools[name] = tools_registry.tools[name]
+    elif executor_type == ExecutorType.SYNTHESIS:
+        pass
+    else:
+        registry.tools = dict(tools_registry.tools)
+    return registry
+

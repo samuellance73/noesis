@@ -41,7 +41,8 @@ from integrations.llm.service import UpstreamService
 from integrations.llm.schemas import ChatMessage, ChatPayload
 from utils.tracer import Trace, set_current_trace, current_aspan
 from .executor import AgentExecutor
-from .schemas import GoalState, ManagerDecision, SubTask
+from .schemas import GoalState, ManagerDecision, SubTask, Mission, Objective
+from .tools import build_specialized_registry
 from agents.memory.episodic_store import EpisodicStore
 from agents.memory.episodic_writer import EpisodicWriter
 from agents.critic import score_result
@@ -63,7 +64,7 @@ _STOP_COMMANDS = frozenset({"stop", "halt", "quit", "exit", "q", "abort"})
 
 _MANAGER_SYSTEM_PROMPT = """\
 You are the strategic Goal Manager of an autonomous AI agent. \
-You oversee the pursuit of the user's ultimate directive across multiple \
+You oversee the pursuit of the user's permanent Mission across multiple \
 autonomous cycles. Each cycle you decide what to do next.
 
 Your job is NOT to answer the user directly — you delegate work to specialized \
@@ -74,13 +75,29 @@ IMPORTANT: Your Executor agents already have access to a Python environment with
 `TELEGRAM_BOT_TOKEN` pre-loaded. Do NOT ask the user for these tokens; your \
 agents can already use them.
 
-You will receive the current goal state (which contains a structured World Model) \
+GOAL HIERARCHY:
+1. Mission: The permanent overarching directive of this run. You CANNOT mutate it.
+2. Objectives: Medium-term milestones derived from the Mission. You should define/track these.
+You must maintain the list of Objectives, marking them "active", "complete", or "deferred", or adding new ones.
+
+EXECUTOR SPECIALIZATION:
+When spawning sub-tasks in `tasks_to_spawn`, you must select the most appropriate `executor_type`:
+- "research" : access to `web_search` only (information gathering).
+- "code"     : access to `python_execute` and `run_command` (computation/scripting).
+- "synthesis": no tools (pure reasoning or text generation from context).
+- "full"      : access to all registered tools (general tasks).
+
+You will receive the current goal state (which contains the Mission, Objectives, and a structured World Model) \
 and any new user messages. You must output a single valid JSON object matching this schema:
 
 {
   "thought": "Your internal reasoning about where the goal stands and what's needed next.",
   "tasks_to_spawn": [
-    {"goal": "Specific sub-task goal", "context": "What the executor needs to know"}
+    {
+      "goal": "Specific sub-task goal",
+      "context": "What the executor needs to know",
+      "executor_type": "research" | "code" | "synthesis" | "full"
+    }
   ],
   "progress_update": "A concise status message to show the user (1-2 sentences).",
   "world_model_patch": {
@@ -89,6 +106,14 @@ and any new user messages. You must output a single valid JSON object matching t
     "domain_updates": {"topic": "description of what we updated/learned about this topic"},
     "belief_updates": {"belief claim": 0.9}
   },
+  "updated_objectives": [
+    {
+      "id": "obj-1",
+      "description": "milestone description",
+      "status": "active" | "complete" | "deferred",
+      "spawned_cycle": 1
+    }
+  ],
   "updated_open_questions": ["question1", "question2"] or null to keep unchanged,
   "is_goal_complete": false,
   "final_answer": null
@@ -160,6 +185,7 @@ class GoalManager:
         set_current_trace(trace)
 
         goal_state = GoalState(ultimate_goal=ultimate_goal)
+        goal_state.mission = Mission(statement=ultimate_goal, domain="general")
         run_log    = RunLogger(goal=ultimate_goal, run_id=trace.id)
         
         episodic_store = EpisodicStore()
@@ -466,10 +492,12 @@ class GoalManager:
         task_log = run_log.open_task_log(global_task_id, task.goal, task.context, cycle)
         logger.info("[%s] SPAWN  cycle=%d  goal=%r", label, cycle, task.goal)
 
+        registry = build_specialized_registry(task.executor_type)
         executor = AgentExecutor(
             llm_service=self.llm_service,
             model=self.model,
             task_label=label,
+            registry=registry,
         )
 
         events: list[dict] = []
@@ -529,6 +557,9 @@ class GoalManager:
             # Update beliefs
             wm.beliefs.update(patch.belief_updates)
 
+        if decision.updated_objectives is not None:
+            goal_state.objectives = decision.updated_objectives
+
         # Record cycle summary
         goal_state.world_model.cycle_summaries.append(
             f"[Cycle {cycle}] {decision.progress_update}"
@@ -561,6 +592,17 @@ class GoalManager:
             f"CYCLE: {state.cycle}",
             "",
         ]
+
+        if state.mission:
+            lines.append(f"MISSION ({state.mission.domain.upper()}):")
+            lines.append(f"  {state.mission.statement}")
+            lines.append("")
+
+        if state.objectives:
+            lines.append("OBJECTIVES:")
+            for obj in state.objectives:
+                lines.append(f"  * [{obj.id}] {obj.description} (status: {obj.status}, spawned cycle: {obj.spawned_cycle})")
+            lines.append("")
 
         wm = state.world_model
 

@@ -1,5 +1,7 @@
+from __future__ import annotations
+from enum import Enum
 from pydantic import BaseModel, Field, model_validator
-from typing import List, Optional, Any
+from typing import List, Optional, Any, Literal
 
 
 # ─── Tool-level schemas ───────────────────────────────────────────────────────
@@ -66,12 +68,54 @@ class AgentState(BaseModel):
 
 # ─── Goal-level schemas (autonomous loop) ────────────────────────────────────
 
+class ExecutorType(str, Enum):
+    """
+    Declares which tool profile an AgentExecutor should be given.
+
+    RESEARCH  — web_search only  (information gathering)
+    CODE      — python_execute + run_command  (computation / scripting)
+    SYNTHESIS — no tools  (pure reasoning / text generation from context)
+    FULL      — all registered tools  (default, backward-compatible)
+    """
+    RESEARCH  = "research"
+    CODE      = "code"
+    SYNTHESIS = "synthesis"
+    FULL      = "full"
+
+
+class Mission(BaseModel):
+    """
+    The permanent, top-level directive that never changes within a run.
+    The manager can read it but may not mutate it.
+    """
+    statement: str = Field(..., description="The overarching, permanent mission.")
+    domain: str = Field(default="general", description="Broad subject domain (e.g. 'AI research', 'software').")
+
+
+class Objective(BaseModel):
+    """
+    Medium-term goals derived from the Mission.
+    The manager spawns tasks to advance objectives and may revise them between cycles.
+    """
+    id: str = Field(..., description="Short unique identifier (e.g. 'obj-1').")
+    description: str = Field(..., description="What this objective achieves.")
+    status: Literal["active", "complete", "deferred"] = Field(
+        default="active",
+        description="Lifecycle state of the objective.",
+    )
+    spawned_cycle: int = Field(default=0, description="Cycle in which this objective was created.")
+
+
 class SubTask(BaseModel):
     """A focused unit of work to be handed to an AgentExecutor."""
     goal: str = Field(..., description="The specific sub-goal for this execution.")
     context: str = Field(
         default="",
         description="Relevant background the executor needs to know (prior findings, constraints, etc.).",
+    )
+    executor_type: ExecutorType = Field(
+        default=ExecutorType.FULL,
+        description="Which tool profile to give the executor. Default keeps all tools (backward-compatible).",
     )
 
 
@@ -112,10 +156,26 @@ class GoalState(BaseModel):
     """
     Persistent state owned by the GoalManager across autonomous cycles.
 
+    Goal hierarchy
+    ──────────────
+    mission     — set once at run_stream(); manager reads but never mutates it.
+    objectives  — manager can add / revise / complete these each cycle.
+    ultimate_goal — kept for backward-compat and as the seed text for the mission.
+
     The `reflection` field is intentionally kept for future metacognition:
     the agent can store a self-assessment of its own reasoning quality here.
     """
     ultimate_goal: str
+    # Goal hierarchy ─────────────────────────────────────────────────────────
+    mission: Optional[Mission] = Field(
+        default=None,
+        description="Permanent top-level directive. Set once, never changed.",
+    )
+    objectives: List[Objective] = Field(
+        default_factory=list,
+        description="Medium-term objectives. Manager may add/revise each cycle.",
+    )
+    # ─────────────────────────────────────────────────────────────────────────
     cycle: int = 0
     task_counter: int = 0
     world_model: WorldModel = Field(default_factory=WorldModel)
@@ -151,11 +211,17 @@ class ManagerDecision(BaseModel):
     - If `is_goal_complete` is True the loop stops.
     - If `tasks_to_spawn` is non-empty, executors are launched in parallel.
     - `progress_update` is streamed to the user / UI after each cycle.
+    - Manager operates at the objective level: it may revise `updated_objectives`
+      each cycle without ever touching GoalState.mission.
     """
     thought: str = Field(..., description="Manager's internal reasoning about the current state of the goal.")
     tasks_to_spawn: List[SubTask] = Field(
         default_factory=list,
-        description="Sub-tasks to execute concurrently this cycle. Empty means synthesise/respond.",
+        description=(
+            "Sub-tasks to execute concurrently this cycle. "
+            "Each entry may specify an executor_type to select a specialised tool profile. "
+            "Empty means synthesise/respond."
+        ),
     )
     progress_update: str = Field(
         ...,
@@ -164,6 +230,13 @@ class ManagerDecision(BaseModel):
     world_model_patch: Optional[WorldModelPatch] = Field(
         None,
         description="New patches to apply to the GoalState's WorldModel (omit or leave empty to keep unchanged).",
+    )
+    updated_objectives: Optional[List[Objective]] = Field(
+        None,
+        description=(
+            "Revised full list of Objectives. Manager may add new ones, mark existing ones complete/deferred, "
+            "or reorder. Omit to leave unchanged. Must not change GoalState.mission."
+        ),
     )
     updated_open_questions: Optional[List[str]] = Field(
         None,
