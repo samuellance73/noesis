@@ -1,3 +1,4 @@
+import inspect
 import logging
 import sys
 import asyncio
@@ -26,7 +27,6 @@ class ToolRegistry:
             return f"Error: Tool '{name}' is not available."
         try:
             func = self.tools[name]
-            import inspect
             if inspect.iscoroutinefunction(func):
                 result = await func(arg)
             else:
@@ -223,6 +223,3 @@ async def send_discord_message(payload_json: str) -> str:
         return f"Success: Message sent to channel {channel_id}."
     except Exception as e:
         return f"Error sending message: {e}"
-
-
-

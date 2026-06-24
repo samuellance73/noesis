@@ -117,6 +117,19 @@ class GoalState(BaseModel):
     # Hook for metacognition — populated by a future reflection step
     reflection: Optional[str] = None
 
+    def record_success(self, goal: str, answer: str) -> None:
+        """Mark a sub-task as successfully completed and remove from failed list."""
+        self.completed.append(CompletedTask(goal=goal, answer=answer))
+        self.failed_tasks = [f for f in self.failed_tasks if f.goal != goal]
+
+    def record_failure(self, goal: str) -> None:
+        """Increment the failure counter for a sub-task, or add it if new."""
+        existing = next((f for f in self.failed_tasks if f.goal == goal), None)
+        if existing:
+            existing.attempts += 1
+        else:
+            self.failed_tasks.append(FailedTask(goal=goal))
+
 
 class ManagerDecision(BaseModel):
     """

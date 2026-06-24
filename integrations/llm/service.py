@@ -1,29 +1,21 @@
 import logging
-from contextlib import asynccontextmanager
+import time
 from typing import AsyncGenerator
+
 import httpx2
-from fastapi import HTTPException
 from tenacity import (
+    RetryError,
+    before_sleep_log,
     retry,
     retry_if_exception,
     stop_after_attempt,
     wait_exponential,
-    before_sleep_log,
-    RetryError,
 )
 
-import json
+from utils.llm_log_formatter import format_chat_block, format_stream_block
 
-logger = logging.getLogger(__name__)
+logger     = logging.getLogger(__name__)
 llm_logger = logging.getLogger("noesis.llm")
-
-def _format_messages(payload: dict) -> str:
-    lines = [f"Model: {payload.get('model', 'unknown')}"]
-    for m in payload.get('messages', []):
-        role = str(m.get('role', 'unknown')).upper()
-        content = str(m.get('content', '')).strip()
-        lines.append(f"[{role}]\n{content}\n")
-    return "\n".join(lines)
 
 
 def _is_retryable(exc: BaseException) -> bool:
@@ -43,33 +35,10 @@ _retry_policy = dict(
     reraise=True,
 )
 
-@asynccontextmanager
-async def handle_upstream_errors():
-    """Centralized context manager for uniform upstream exception handling."""
-    try:
-        yield
-    except httpx2.HTTPStatusError as exc:
-        logger.error(f"Upstream returned HTTP error {exc.response.status_code}: {exc.response.text}")
-        raise HTTPException(
-            status_code=exc.response.status_code,
-            detail=f"Upstream API Error: {exc.response.text}"
-        )
-    except httpx2.RequestError as exc:
-        logger.error(f"Network error while connecting to upstream: {exc}")
-        raise HTTPException(
-            status_code=503,
-            detail="The upstream service is temporarily unreachable."
-        )
-    except Exception as exc:
-        logger.error(f"Unexpected internal server error: {exc}", exc_info=True)
-        raise HTTPException(
-            status_code=500,
-            detail="An internal server error occurred while processing your request."
-        )
 
 class UpstreamService:
     def __init__(self, client: httpx2.AsyncClient):
-        # We inject a shared, pooled client rather than creating one per request
+        # Inject a shared, pooled client rather than creating one per request.
         self.client = client
 
     @retry(**_retry_policy)
@@ -82,19 +51,14 @@ class UpstreamService:
     @retry(**_retry_policy)
     async def get_chat_completion(self, payload: dict) -> dict:
         """Raw httpx exceptions bubble out so @retry can act on them."""
-        llm_logger.info("=== LLM Request ===\n" + _format_messages(payload))
+        t0 = time.perf_counter()
+
         response = await self.client.post("chat/completions", json=payload)
         response.raise_for_status()
-        data = response.json()
-        
-        res_lines = []
-        for c in data.get('choices', []):
-            msg = c.get('message', {})
-            role = str(msg.get('role', 'ASSISTANT')).upper()
-            content = str(msg.get('content', '')).strip()
-            res_lines.append(f"[{role}]\n{content}")
-            
-        llm_logger.info("=== LLM Response ===\n" + "\n\n".join(res_lines))
+        data    = response.json()
+        elapsed = time.perf_counter() - t0
+
+        llm_logger.info(format_chat_block(payload, data, elapsed))
         return data
 
     async def stream_chat_completion(self, payload: dict) -> AsyncGenerator[str, None]:
@@ -104,7 +68,7 @@ class UpstreamService:
         would cause duplicate tokens, so once we start yielding we let any
         error surface naturally.
         """
-        llm_logger.info("=== LLM Stream Request ===\n" + _format_messages(payload))
+        t0 = time.perf_counter()
 
         @retry(**{**_retry_policy, "stop": stop_after_attempt(3)})
         async def _open_stream():
@@ -114,27 +78,29 @@ class UpstreamService:
                 stream=True,
             )
             if response.status_code != 200:
-                error_body = await response.aread()
-                exc = httpx2.HTTPStatusError(
+                await response.aread()
+                raise httpx2.HTTPStatusError(
                     f"Upstream error {response.status_code}",
                     request=response.request,
                     response=response,
                 )
-                raise exc
             return response
 
         try:
             response = await _open_stream()
             async with response:
-                full_stream = []
+                raw_lines: list[str] = []
                 async for line in response.aiter_lines():
                     if line:
                         yield f"{line}\n"
-                        full_stream.append(line)
-                llm_logger.info("=== LLM Streamed Response ===\n" + "".join(full_stream))
+                        raw_lines.append(line)
+
+                elapsed = time.perf_counter() - t0
+                llm_logger.info(format_stream_block(payload, raw_lines, elapsed))
+
         except RetryError as exc:
-            logger.error(f"Stream connect failed after retries: {exc}")
-            yield f"data: {{\"error\": \"Upstream unavailable after retries.\"}}\n\n"
+            logger.error("Stream connect failed after retries: %s", exc)
+            yield 'data: {"error": "Upstream unavailable after retries."}\n\n'
         except Exception as exc:
-            logger.error(f"Streaming failed: {exc}", exc_info=True)
-            yield f"data: {{\"error\": \"Streaming interruption occurred: {str(exc)}\"}}\n\n"
+            logger.error("Streaming failed: %s", exc, exc_info=True)
+            yield f'data: {{"error": "Streaming interruption occurred: {exc}"}}\n\n'

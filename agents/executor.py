@@ -212,19 +212,7 @@ class AgentExecutor:
                         }
 
                     # Execute all tools concurrently
-                    async def _run_tool(tc: ToolCall) -> tuple[str, str, str]:
-                        """Returns (tool_name, tool_input_repr, observation)."""
-                        obs = await self._registry.execute(tc.tool_name, tc.tool_input)
-                        if len(obs) > _MAX_OBSERVATION_CHARS:
-                            extra = len(obs) - _MAX_OBSERVATION_CHARS
-                            logger.warning(
-                                "%sObservation from %r truncated: %d → %d chars (+%d omitted)",
-                                self._label, tc.tool_name, len(obs), _MAX_OBSERVATION_CHARS, extra,
-                            )
-                            obs = obs[:_MAX_OBSERVATION_CHARS] + f"\n... [truncated: {extra} chars omitted]"
-                        return tc.tool_name, str(tc.tool_input), obs
-
-                    results = await asyncio.gather(*(_run_tool(tc) for tc in tool_calls))
+                    results = await asyncio.gather(*(self._run_tool(tc) for tc in tool_calls))
 
                     # Compile all observations into a single user message
                     observation_parts = [
@@ -261,3 +249,16 @@ class AgentExecutor:
                     span.log_error("No tool calls or final answer — reprompting.")
 
         yield {"event": "error", "message": "Execution limit reached without finding a final answer."}
+
+    async def _run_tool(self, tc: ToolCall) -> tuple[str, str, str]:
+        """Returns (tool_name, tool_input_repr, observation)."""
+        obs = await self._registry.execute(tc.tool_name, tc.tool_input)
+        if len(obs) > _MAX_OBSERVATION_CHARS:
+            extra = len(obs) - _MAX_OBSERVATION_CHARS
+            logger.warning(
+                "%sObservation from %r truncated: %d → %d chars (+%d omitted)",
+                self._label, tc.tool_name, len(obs), _MAX_OBSERVATION_CHARS, extra,
+            )
+            obs = obs[:_MAX_OBSERVATION_CHARS] + f"\n... [truncated: {extra} chars omitted]"
+        return tc.tool_name, str(tc.tool_input), obs
+

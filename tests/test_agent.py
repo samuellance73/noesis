@@ -1,17 +1,10 @@
 import json
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
-from fastapi.testclient import TestClient
 
-from main import app
 from integrations.llm.service import UpstreamService
 from agents.executor import AgentExecutor
 from agents.tools import tools_registry
-
-@pytest.fixture
-def client():
-    with TestClient(app) as c:
-        yield c
 
 @pytest.mark.asyncio
 async def test_agent_executor_final_answer_directly():
@@ -112,49 +105,6 @@ async def test_agent_executor_with_tool_call():
         tools_registry.tools["web_search"] = original_tool
 
 
-def test_agent_endpoint_success(client):
-    # Mock upstream client's post call, since router resolves service and calls get_chat_completion
-    # which uses httpx2.AsyncClient
-    with patch("httpx2.AsyncClient.post") as mock_post:
-        # First call (planning stage is bypassed, runs executor directly)
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "choices": [
-                {
-                    "message": {
-                        "role": "assistant",
-                        "content": json.dumps({
-                            "thought": "Ready.",
-                            "tool_calls": [],
-                            "final_answer": "Agent response content"
-                        })
-                    }
-                }
-            ]
-        }
-        mock_response.raise_for_status = MagicMock()
-
-        mock_post.return_value = mock_response
-        
-        payload = {
-            "model": "test-agent-model",
-            "user_input": "Hello agent",
-            "stream": False
-        }
-        
-        response = client.post("/api/agent/run", json=payload)
-        assert response.status_code == 200
-        assert response.json() == {
-            "result": "Agent response content"
-        }
-        assert mock_post.call_count == 1
-
-
-def test_agent_endpoint_goal_autonomous(client):
-    # Tests the new goal-directed autonomous flow
-    # We will just verify it can run and call GoalManager router setup
-    pass
 
 
 def test_parse_agent_step_resilient():

@@ -30,9 +30,7 @@ from typing import Optional
 
 import discord
 
-from integrations.llm.client import get_client
-from integrations.llm.service import UpstreamService
-from integrations.llm.schemas import ChatMessage, ChatPayload
+# integrations.llm imports removed as the bot only submits triggers to the store
 from triggers.store import trigger_store
 from utils.event_bus import event_bus
 
@@ -215,23 +213,13 @@ def _format_event(event: dict) -> Optional[str]:
 # discord.py-self uses a plain Client. Passing no intents is fine for selfbots.
 bot = discord.Client()
 
-# Shared LLM client/service — initialised in on_ready so the event loop is live.
-_http_client_ctx = None
-_service: Optional[UpstreamService] = None
-
 
 @bot.event
 async def on_ready():
-    global _http_client_ctx, _service
     logger.info("Discord selfbot logged in as %s (id=%s)", bot.user, bot.user.id)
     print(f"✅ Discord selfbot ready — logged in as {bot.user} ({bot.user.id})")
     print(f"   Human operator : {HUMAN_USERNAME!r}")
     print(f"   Default model  : {DEFAULT_MODEL}")
-
-    # Open a persistent httpx client for the lifetime of the bot.
-    _http_client_ctx = get_client(timeout=60.0)
-    http_client = await _http_client_ctx.__aenter__()
-    _service = UpstreamService(http_client)
 
     # Start event bus listener to route daemon events back to Discord channels.
     asyncio.ensure_future(_listen_to_event_bus())
@@ -325,6 +313,21 @@ async def _handle_human_message(message: discord.Message) -> None:
 
 # ── Neutral-user handling ─────────────────────────────────────────────────────
 
+def _build_neutral_trigger_description(message: discord.Message, context: str) -> str:
+    """Build the prompt description for neutral user triggers."""
+    context_section = (
+        f"Recent conversation context (last {CONTEXT_MESSAGES_LIMIT} messages):\n{context}\n\n"
+        if context else ""
+    )
+    return (
+        f"Ultimate Goal: Act as a highly capable AI assistant. If the user asks you to perform a task (like creating a GitHub repo, writing code, etc.), you MUST execute it using your available tools (like python_execute) FIRST before replying. Do not hallucinate actions. Once you have actually completed the task, reply to the user to inform them of the results.\n\n"
+        f"{context_section}"
+        f"In Discord channel {message.channel.id}, user '{message.author.display_name}' (@{message.author.name}) said:\n"
+        f"{message.content}\n\n"
+        f"Please fulfill their request if possible, then reply to them in channel {message.channel.id} using the send_discord_message tool."
+    )
+
+
 async def _handle_neutral_message(message: discord.Message) -> None:
     """
     Messages from anyone who is NOT the human operator (psilko).
@@ -332,17 +335,7 @@ async def _handle_neutral_message(message: discord.Message) -> None:
     Submit to the daemon's trigger store (picked up on the next 60-second poll).
     """
     context = await _fetch_context(message.channel, before_message=message)
-    context_section = (
-        f"Recent conversation context (last {CONTEXT_MESSAGES_LIMIT} messages):\n{context}\n\n"
-        if context else ""
-    )
-    description = (
-        f"Ultimate Goal: Act as a highly capable AI assistant. If the user asks you to perform a task (like creating a GitHub repo, writing code, etc.), you MUST execute it using your available tools (like python_execute) FIRST before replying. Do not hallucinate actions. Once you have actually completed the task, reply to the user to inform them of the results.\n\n"
-        f"{context_section}"
-        f"In Discord channel {message.channel.id}, user '{message.author.display_name}' (@{message.author.name}) said:\n"
-        f"{message.content}\n\n"
-        f"Please fulfill their request if possible, then reply to them in channel {message.channel.id} using the send_discord_message tool."
-    )
+    description = _build_neutral_trigger_description(message, context)
     bunch_key = f"discord_{message.channel.id}_{message.author.id}"
     trigger_store.submit(
         source="discord",

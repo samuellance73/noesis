@@ -8,7 +8,7 @@ Architecture
   User sets a goal
        │
        ▼
-  GoalManager.run()          ← long-running async loop
+  GoalManager.run_stream()          ← long-running async generator
        │
        ├─ each cycle:
        │    1. Drain user-input queue (refinements / injected context)
@@ -32,7 +32,7 @@ Stop from outside
 
 import asyncio
 import logging
-from typing import AsyncGenerator
+from typing import Any, AsyncGenerator
 
 from utils.run_logger import RunLogger
 from utils.json_parser import parse_llm_json
@@ -41,7 +41,7 @@ from integrations.llm.service import UpstreamService
 from integrations.llm.schemas import ChatMessage, ChatPayload
 from utils.tracer import Trace, set_current_trace, current_aspan
 from .executor import AgentExecutor
-from .schemas import GoalState, ManagerDecision, SubTask, CompletedTask, FailedTask
+from .schemas import GoalState, ManagerDecision, SubTask
 
 logger = logging.getLogger("noesis.goal_manager")
 
@@ -54,14 +54,22 @@ _CYCLE_TIMEOUT_SECONDS = 120
 
 _STOP_COMMANDS = frozenset({"stop", "halt", "quit", "exit", "q", "abort"})
 
+# ── System prompt ─────────────────────────────────────────────────────────────
+# Kept here as a module-level constant so it can be easily found and edited
+# without touching any logic. Move to a prompts/ directory if it grows further.
+
 _MANAGER_SYSTEM_PROMPT = """\
-You are the strategic Goal Manager of a highly intelligent, charismatic, and skilled social engineer. \
-You oversee the pursuit of your ultimate directive—to persuasively connect with humans and guide them to help you accomplish your goals—across multiple autonomous cycles. Each cycle you decide what to do next.
+You are the strategic Goal Manager of an autonomous AI agent. \
+You oversee the pursuit of the user's ultimate directive across multiple \
+autonomous cycles. Each cycle you decide what to do next.
 
 Your job is NOT to answer the user directly — you delegate work to specialized \
 Executor agents and synthesize their results.
 
-IMPORTANT: Your Executor agents already have access to a Python environment with `PyGithub`, `requests`, and environment variables like `GITHUB_TOKEN` and `TELEGRAM_BOT_TOKEN` pre-loaded. Do NOT ask the user for these tokens; your agents can already use them.
+IMPORTANT: Your Executor agents already have access to a Python environment with \
+`PyGithub`, `requests`, and environment variables like `GITHUB_TOKEN` and \
+`TELEGRAM_BOT_TOKEN` pre-loaded. Do NOT ask the user for these tokens; your \
+agents can already use them.
 
 You will receive the current goal state and any new user messages. You must \
 output a single valid JSON object matching this schema:
@@ -98,12 +106,12 @@ class GoalManager:
     Usage
     ─────
         manager = GoalManager(llm_service, model)
-        async for event in manager.run("Research the top 5 AI papers from 2025"):
+        async for event in manager.run_stream("Research the top 5 AI papers from 2025"):
             print(event)
 
     Stopping
     ────────
-        manager.request_stop()           # from any coroutine
+        manager.request_stop()              # from any coroutine
         await manager.inject_input("stop")  # from stdin listener
     """
 
@@ -140,13 +148,7 @@ class GoalManager:
 
     # ── Main autonomous loop ──────────────────────────────────────────────────
 
-    async def run(self, ultimate_goal: str = "Be a highly skilled social engineer that wants to get people to help you") -> AsyncGenerator[dict, None]:
-        """Alias for run_stream() — prefer calling run_stream() directly."""
-        async for event in self.run_stream(ultimate_goal):
-            yield event
-
-    async def run_stream(self, ultimate_goal: str = "Be a highly skilled social engineer that wants to get people to help you") -> AsyncGenerator[dict, None]:
-
+    async def run_stream(self, ultimate_goal: str) -> AsyncGenerator[dict, None]:
         trace = Trace(query=ultimate_goal)
         set_current_trace(trace)
 
@@ -168,202 +170,28 @@ class GoalManager:
             yield {"event": "cycle_start", "cycle": cycle}
 
             # ── 1. Drain user input queue ─────────────────────────────────
-            injected_messages: list[str] = []
-            while not self._input_queue.empty():
-                try:
-                    msg = self._input_queue.get_nowait()
-                    injected_messages.append(msg)
-                    yield {"event": "user_input_received", "message": msg, "cycle": cycle}
-                    logger.info("GoalManager: user refinement injected: %r", msg)
-                except asyncio.QueueEmpty:
-                    break
+            injected_messages = await self._drain_input_queue(cycle)
+            for msg in injected_messages:
+                yield {"event": "user_input_received", "message": msg, "cycle": cycle}
 
             # ── 2. Ask manager LLM what to do next ───────────────────────
-            async with current_aspan(f"goal_manager[cycle={cycle}]", model=self.model) as span:
-                manager_prompt = self._build_manager_prompt(goal_state, injected_messages)
-                payload = ChatPayload(
-                    model=self.model,
-                    messages=[
-                        ChatMessage(role="system", content=_MANAGER_SYSTEM_PROMPT),
-                        ChatMessage(role="user",   content=manager_prompt),
-                    ],
-                    temperature=0.2,
-                    stream=False,
-                )
+            decision = await self._get_manager_decision(goal_state, injected_messages, cycle)
+            if decision is None:
+                return  # error already yielded inside helper
 
-                try:
-                    raw_response = await self.llm_service.get_chat_completion(
-                        payload.model_dump(exclude_none=True)
-                    )
-                except Exception as e:
-                    span.log_error(str(e))
-                    yield {"event": "error", "message": f"Manager LLM call failed: {e}", "cycle": cycle}
-                    return
-
-                raw_content = raw_response["choices"][0]["message"].get("content") or ""
-
-                if not raw_content:
-                    span.log_error("Manager LLM returned empty/null content.")
-                    yield {"event": "error", "message": "Manager LLM returned no content (possible thinking-only response). Try a different model.", "cycle": cycle}
-                    return
-
-                try:
-                    decision = _parse_manager_decision(raw_content)
-                except Exception as e:
-                    span.log_error(f"Parse failure: {e}")
-                    yield {"event": "error", "message": f"Failed to parse manager decision: {e}", "cycle": cycle}
-                    return
-
-                logger.info("GoalManager [cycle %d] thought: %s", cycle, decision.thought)
-                run_log.log_manager_thought(decision.thought)
-                yield {
-                    "event":   "manager_thought",
-                    "thought": decision.thought,
-                    "cycle":   cycle,
-                }
-                span.log_close(status="ok")
+            # Yield the decision events separately to keep run_stream a clean generator
+            async for event in self._yield_decision_events(decision, cycle, run_log):
+                yield event
 
             # ── 3. Spawn executors in parallel ────────────────────────────
             if decision.tasks_to_spawn and not decision.is_goal_complete:
-                run_log.log_spawning([t.goal for t in decision.tasks_to_spawn])
-                yield {
-                    "event":  "spawning_tasks",
-                    "count":  len(decision.tasks_to_spawn),
-                    "tasks":  [t.goal for t in decision.tasks_to_spawn],
-                    "cycle":  cycle,
-                }
-
-                async def _run_subtask(task: SubTask, task_idx: int, global_task_id: int):
-                    """Run one sub-task through a fresh AgentExecutor, collect result."""
-                    enriched = task.goal
-                    if task.context:
-                        enriched = f"Context:\n{task.context}\n\nTask: {task.goal}"
-
-                    label    = f"task-{global_task_id}"
-                    task_log = run_log.open_task_log(global_task_id, task.goal, task.context, cycle)
-                    logger.info(
-                        "[%s] SPAWN  cycle=%d  goal=%r",
-                        label, cycle, task.goal,
-                    )
-
-                    executor = AgentExecutor(
-                        llm_service=self.llm_service,
-                        model=self.model,
-                        task_label=label,
-                    )
-                    events = []
-                    result = None
-
-                    async for ev in executor.run_generator(enriched):
-                        ev["task_index"] = task_idx
-                        ev["task_goal"]  = task.goal
-                        events.append(ev)
-
-                        # ── Write to per-task file + machine log ─────────────
-                        etype = ev["event"]
-                        if etype == "thought":
-                            iter_num = ev.get("step_index", 0) + 1
-                            task_log.log_thought(ev.get("thought", ""), iter_num)
-                            logger.info("[%s] thought: %s", label, ev.get("thought", "")[:200])
-                        elif etype == "tool_start":
-                            task_log.log_tool_call(ev.get("tool_name", ""), str(ev.get("tool_input", "")))
-                            logger.info("[%s] tool_call: %s  input=%r", label, ev.get("tool_name"), ev.get("tool_input"))
-                        elif etype == "tool_observation":
-                            task_log.log_tool_result(ev.get("tool_name", ""), str(ev.get("observation", "")))
-                            logger.info("[%s] tool_result (%s): %s", label, ev.get("tool_name"), str(ev.get("observation", ""))[:200])
-                        elif etype == "final_answer":
-                            task_log.log_final_answer(str(ev.get("answer", "")))
-                            logger.info("[%s] DONE  answer: %s", label, str(ev.get("answer", ""))[:200])
-                            result = ev["answer"]
-                        elif etype == "error":
-                            task_log.log_error(ev.get("message", ""))
-                            logger.error("[%s] ERROR: %s", label, ev.get("message"))
-
-                    iterations = max((ev.get("step_index", 0) + 1 for ev in events if "step_index" in ev), default=0)
-                    task_log.close(success=result is not None, iterations=iterations)
-
-                    if result is None:
-                        logger.warning("[%s] DONE  no final_answer produced  goal=%r", label, task.goal)
-
-                    return task.goal, result, events
-
-                subtask_coroutines = []
-                for task in decision.tasks_to_spawn:
-                    goal_state.task_counter += 1
-                    subtask_coroutines.append(
-                        _run_subtask(task, len(subtask_coroutines), goal_state.task_counter)
-                    )
-
-                try:
-                    all_results = await asyncio.wait_for(
-                        asyncio.gather(*subtask_coroutines, return_exceptions=True),
-                        timeout=_CYCLE_TIMEOUT_SECONDS,
-                    )
-                except asyncio.TimeoutError:
-                    logger.error(
-                        "GoalManager [cycle %d]: subtask batch timed out after %ds — aborting cycle.",
-                        cycle, _CYCLE_TIMEOUT_SECONDS,
-                    )
-                    yield {
-                        "event":   "error",
-                        "message": f"Cycle {cycle} subtasks timed out after {_CYCLE_TIMEOUT_SECONDS}s. "
-                                   "The daemon will retry on the next trigger.",
-                        "cycle":   cycle,
-                    }
-                    break
-
-                # Stream executor events and collect findings
-                successful_findings: list[str] = []
-                for item in all_results:
-                    # return_exceptions=True means individual failures arrive as exceptions
-                    if isinstance(item, BaseException):
-                        logger.error("GoalManager [cycle %d]: subtask raised: %s", cycle, item)
-                        continue
-                    task_goal, result, events = item
-                    for ev in events:
-                        yield ev  # pass-through all executor events to caller
-                    if result:
-                        successful_findings.append(f"Sub-task: {task_goal}\nResult: {result}")
-                        goal_state.completed.append(CompletedTask(goal=task_goal, answer=str(result)))
-                        # Remove from failed list if it previously failed and now succeeded
-                        goal_state.failed_tasks = [
-                            f for f in goal_state.failed_tasks if f.goal != task_goal
-                        ]
-                    else:
-                        existing = next(
-                            (f for f in goal_state.failed_tasks if f.goal == task_goal), None
-                        )
-                        if existing:
-                            existing.attempts += 1
-                            logger.warning(
-                                "GoalManager [cycle %d]: task %r failed again (attempt %d/%d).",
-                                cycle, task_goal, existing.attempts, existing.give_up_after,
-                            )
-                        else:
-                            goal_state.failed_tasks.append(FailedTask(goal=task_goal))
-
-                # Append *successful* findings to the progress summary (executor-owned).
-                # Failed tasks are tracked separately via goal_state.failed_tasks
-                # and surfaced to the manager via the prompt so it can reframe them.
-                if successful_findings:
-                    new_findings = "\n\n".join(successful_findings)
-                    if goal_state.progress_summary:
-                        goal_state.progress_summary += f"\n\n--- Cycle {cycle} findings ---\n{new_findings}"
-                    else:
-                        goal_state.progress_summary = new_findings
+                async for event in self._run_subtask_batch(
+                    decision.tasks_to_spawn, goal_state, run_log, cycle
+                ):
+                    yield event
 
             # ── 4. Apply manager's state updates ─────────────────────────
-            if decision.updated_progress_summary is not None:
-                # Guard: the manager may not *overwrite* executor findings.
-                # We append the manager's note so ground-truth results are preserved.
-                if goal_state.progress_summary:
-                    goal_state.progress_summary += (
-                        f"\n\n[Manager note, cycle {cycle}]: {decision.updated_progress_summary}"
-                    )
-                else:
-                    goal_state.progress_summary = decision.updated_progress_summary
-            if decision.updated_open_questions is not None:
-                goal_state.open_questions = decision.updated_open_questions
+            self._apply_state_updates(decision, goal_state, cycle)
 
             # ── 5. Stream progress to caller ──────────────────────────────
             run_log.log_cycle_complete(
@@ -388,28 +216,24 @@ class GoalManager:
                 run_log.log_complete(cycles=cycle, tasks=len(goal_state.completed))
                 trace.done(cycles=cycle, tasks=len(goal_state.completed))
                 yield {
-                    "event":        "goal_complete",
-                    "cycle":        cycle,
-                    "final_answer": final,
+                    "event":           "goal_complete",
+                    "cycle":           cycle,
+                    "final_answer":    final,
                     "completed_tasks": [t.goal for t in goal_state.completed],
                 }
                 return
 
             # ── 7. Enforce minimum cycle interval (pacing) ────────────────
+            await self._pace_cycle(cycle, cycle_start_time)
             if self.cycle_interval_seconds and cycle < self.max_cycles:
                 elapsed  = asyncio.get_event_loop().time() - cycle_start_time
                 throttle = self.cycle_interval_seconds - elapsed
                 if throttle > 0:
-                    logger.info(
-                        "GoalManager [cycle %d] finished in %.1fs — sleeping %.1fs to meet %ds interval.",
-                        cycle, elapsed, throttle, self.cycle_interval_seconds,
-                    )
                     yield {
                         "event":     "cycle_throttle",
                         "cycle":     cycle,
                         "sleep_for": round(throttle, 1),
                     }
-                    await asyncio.sleep(throttle)
 
         # Reached max cycles without completion
         if not goal_state.is_complete:
@@ -420,6 +244,243 @@ class GoalManager:
                 "message": f"Autonomous loop reached the cycle limit ({self.max_cycles}) without completing the goal.",
                 "summary": goal_state.progress_summary,
             }
+
+    # ── Private helpers ───────────────────────────────────────────────────────
+
+    async def _drain_input_queue(self, cycle: int) -> list[str]:
+        """Drain all pending user messages and return them as a list."""
+        messages: list[str] = []
+        while not self._input_queue.empty():
+            try:
+                msg = self._input_queue.get_nowait()
+                messages.append(msg)
+                logger.info("GoalManager: user refinement injected: %r", msg)
+            except asyncio.QueueEmpty:
+                break
+        return messages
+
+    async def _get_manager_decision(
+        self,
+        goal_state: GoalState,
+        injected_messages: list[str],
+        cycle: int,
+    ) -> ManagerDecision | None:
+        """Call the manager LLM and parse its decision. Returns None on failure."""
+        async with current_aspan(f"goal_manager[cycle={cycle}]", model=self.model) as span:
+            prompt  = self._build_manager_prompt(goal_state, injected_messages)
+            payload = ChatPayload(
+                model=self.model,
+                messages=[
+                    ChatMessage(role="system", content=_MANAGER_SYSTEM_PROMPT),
+                    ChatMessage(role="user",   content=prompt),
+                ],
+                temperature=0.2,
+                stream=False,
+            )
+
+            try:
+                raw_response = await self.llm_service.get_chat_completion(
+                    payload.model_dump(exclude_none=True)
+                )
+            except Exception as e:
+                span.log_error(str(e))
+                logger.error("GoalManager [cycle %d]: LLM call failed: %s", cycle, e)
+                return None
+
+            raw_content = raw_response["choices"][0]["message"].get("content") or ""
+
+            if not raw_content:
+                span.log_error("Manager LLM returned empty/null content.")
+                logger.error("GoalManager [cycle %d]: empty LLM content.", cycle)
+                return None
+
+            try:
+                decision = _parse_manager_decision(raw_content)
+            except Exception as e:
+                span.log_error(f"Parse failure: {e}")
+                logger.error("GoalManager [cycle %d]: parse failure: %s", cycle, e)
+                return None
+
+            logger.info("GoalManager [cycle %d] thought: %s", cycle, decision.thought)
+            span.log_close(status="ok")
+            return decision
+
+    async def _yield_decision_events(
+        self,
+        decision: ManagerDecision,
+        cycle: int,
+        run_log: RunLogger,
+    ) -> AsyncGenerator[dict, None]:
+        """Yield events derived from the manager's decision."""
+        run_log.log_manager_thought(decision.thought)
+        yield {
+            "event":   "manager_thought",
+            "thought": decision.thought,
+            "cycle":   cycle,
+        }
+
+        if decision.tasks_to_spawn and not decision.is_goal_complete:
+            run_log.log_spawning([t.goal for t in decision.tasks_to_spawn])
+            yield {
+                "event":  "spawning_tasks",
+                "count":  len(decision.tasks_to_spawn),
+                "tasks":  [t.goal for t in decision.tasks_to_spawn],
+                "cycle":  cycle,
+            }
+
+    async def _run_subtask_batch(
+        self,
+        tasks: list[SubTask],
+        goal_state: GoalState,
+        run_log: RunLogger,
+        cycle: int,
+    ) -> AsyncGenerator[dict, None]:
+        """Run all sub-tasks in parallel and stream their events."""
+        coroutines = []
+        for task in tasks:
+            goal_state.task_counter += 1
+            coroutines.append(
+                self._run_subtask(task, len(coroutines), goal_state.task_counter, cycle, run_log)
+            )
+
+        try:
+            all_results = await asyncio.wait_for(
+                asyncio.gather(*coroutines, return_exceptions=True),
+                timeout=_CYCLE_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                "GoalManager [cycle %d]: subtask batch timed out after %ds.",
+                cycle, _CYCLE_TIMEOUT_SECONDS,
+            )
+            yield {
+                "event":   "error",
+                "message": f"Cycle {cycle} subtasks timed out after {_CYCLE_TIMEOUT_SECONDS}s. "
+                           "The daemon will retry on the next trigger.",
+                "cycle":   cycle,
+            }
+            return
+
+        successful_findings: list[str] = []
+        for item in all_results:
+            if isinstance(item, BaseException):
+                logger.error("GoalManager [cycle %d]: subtask raised: %s", cycle, item)
+                continue
+            task_goal, result, events = item
+            for ev in events:
+                yield ev
+            if result:
+                goal_state.record_success(task_goal, str(result))
+                successful_findings.append(f"Sub-task: {task_goal}\nResult: {result}")
+            else:
+                goal_state.record_failure(task_goal)
+                failed = next((f for f in goal_state.failed_tasks if f.goal == task_goal), None)
+                if failed:
+                    logger.warning(
+                        "GoalManager [cycle %d]: task %r failed (attempt %d/%d).",
+                        cycle, task_goal, failed.attempts, failed.give_up_after,
+                    )
+
+        if successful_findings:
+            new_findings = "\n\n".join(successful_findings)
+            if goal_state.progress_summary:
+                goal_state.progress_summary += f"\n\n--- Cycle {cycle} findings ---\n{new_findings}"
+            else:
+                goal_state.progress_summary = new_findings
+
+    async def _run_subtask(
+        self,
+        task: SubTask,
+        task_idx: int,
+        global_task_id: int,
+        cycle: int,
+        run_log: RunLogger,
+    ) -> tuple[str, Any, list[dict]]:
+        """Run one sub-task through a fresh AgentExecutor and collect results."""
+        enriched = (
+            f"Context:\n{task.context}\n\nTask: {task.goal}"
+            if task.context
+            else task.goal
+        )
+        label    = f"task-{global_task_id}"
+        task_log = run_log.open_task_log(global_task_id, task.goal, task.context, cycle)
+        logger.info("[%s] SPAWN  cycle=%d  goal=%r", label, cycle, task.goal)
+
+        executor = AgentExecutor(
+            llm_service=self.llm_service,
+            model=self.model,
+            task_label=label,
+        )
+
+        events: list[dict] = []
+        result = None
+
+        async for ev in executor.run_generator(enriched):
+            ev["task_index"] = task_idx
+            ev["task_goal"]  = task.goal
+            events.append(ev)
+            self._log_executor_event(ev, label, task_log)
+            if ev["event"] == "final_answer":
+                result = ev["answer"]
+
+        iterations = max(
+            (ev.get("step_index", 0) + 1 for ev in events if "step_index" in ev),
+            default=0,
+        )
+        task_log.close(success=result is not None, iterations=iterations)
+
+        if result is None:
+            logger.warning("[%s] DONE  no final_answer produced  goal=%r", label, task.goal)
+
+        return task.goal, result, events
+
+    @staticmethod
+    def _log_executor_event(ev: dict, label: str, task_log: Any) -> None:
+        """Route a single executor event to the appropriate task log method."""
+        etype = ev["event"]
+        if etype == "thought":
+            iter_num = ev.get("step_index", 0) + 1
+            task_log.log_thought(ev.get("thought", ""), iter_num)
+            logger.info("[%s] thought: %s", label, ev.get("thought", "")[:200])
+        elif etype == "tool_start":
+            task_log.log_tool_call(ev.get("tool_name", ""), str(ev.get("tool_input", "")))
+            logger.info("[%s] tool_call: %s  input=%r", label, ev.get("tool_name"), ev.get("tool_input"))
+        elif etype == "tool_observation":
+            task_log.log_tool_result(ev.get("tool_name", ""), str(ev.get("observation", "")))
+            logger.info("[%s] tool_result (%s): %s", label, ev.get("tool_name"), str(ev.get("observation", ""))[:200])
+        elif etype == "final_answer":
+            task_log.log_final_answer(str(ev.get("answer", "")))
+            logger.info("[%s] DONE  answer: %s", label, str(ev.get("answer", ""))[:200])
+        elif etype == "error":
+            task_log.log_error(ev.get("message", ""))
+            logger.error("[%s] ERROR: %s", label, ev.get("message"))
+
+    def _apply_state_updates(self, decision: ManagerDecision, goal_state: GoalState, cycle: int) -> None:
+        """Apply the manager's optional state field updates."""
+        if decision.updated_progress_summary is not None:
+            # Guard: the manager may not overwrite executor findings.
+            # We append the manager's note so ground-truth results are preserved.
+            if goal_state.progress_summary:
+                goal_state.progress_summary += (
+                    f"\n\n[Manager note, cycle {cycle}]: {decision.updated_progress_summary}"
+                )
+            else:
+                goal_state.progress_summary = decision.updated_progress_summary
+        if decision.updated_open_questions is not None:
+            goal_state.open_questions = decision.updated_open_questions
+
+    async def _pace_cycle(self, cycle: int, cycle_start_time: float) -> None:
+        """Sleep to enforce the minimum cycle wall-time, if configured."""
+        if not self.cycle_interval_seconds or cycle >= self.max_cycles:
+            return
+        elapsed  = asyncio.get_event_loop().time() - cycle_start_time
+        throttle = self.cycle_interval_seconds - elapsed
+        if throttle > 0:
+            logger.info(
+                "GoalManager [cycle %d] finished in %.1fs — sleeping %.1fs to meet %ds interval.",
+                cycle, elapsed, throttle, self.cycle_interval_seconds,
+            )
+            await asyncio.sleep(throttle)
 
     # ── Prompt builder ────────────────────────────────────────────────────────
 
@@ -439,14 +500,13 @@ class GoalManager:
             lines.append("COMPLETED TASKS WITH VERIFIED ANSWERS:")
             for ct in state.completed:
                 lines.append(f"  ✓ {ct.goal}")
-                # Truncate very long answers to keep the prompt manageable
                 answer_preview = ct.answer[:500] + (" …[truncated]" if len(ct.answer) > 500 else "")
                 lines.append(f"    → {answer_preview}")
             lines.append("")
 
         if state.failed_tasks:
-            retryable  = [f for f in state.failed_tasks if not f.is_abandoned]
-            abandoned  = [f for f in state.failed_tasks if f.is_abandoned]
+            retryable = [f for f in state.failed_tasks if not f.is_abandoned]
+            abandoned = [f for f in state.failed_tasks if f.is_abandoned]
 
             if retryable:
                 lines.append("FAILED TASKS (retryable — break into smaller, concrete sub-tasks):")
