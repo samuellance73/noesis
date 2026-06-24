@@ -112,16 +112,18 @@ async def _flush_all_buffers() -> None:
 async def _fetch_context(channel: discord.TextChannel, before_message: discord.Message) -> str:
     """
     Return the last CONTEXT_MESSAGES_LIMIT messages in the channel *before*
-    `before_message`, formatted as a readable conversation transcript.
+    `before_message`, formatted as a readable conversation transcript,
+    excluding any bot messages.
     """
     lines: list[str] = []
-    async for msg in channel.history(limit=CONTEXT_MESSAGES_LIMIT, before=before_message):
+    # Fetch a larger window (e.g. 100 messages) to find enough non-bot messages
+    async for msg in channel.history(limit=100, before=before_message):
         if msg.author == bot.user:
-            author_tag = "[Agent]"
-        else:
-            author_tag = f"{msg.author.display_name} (@{msg.author.name})"
+            continue
         if msg.content.strip():
-            lines.append(f"  [{author_tag}]: {msg.content.strip()}")
+            lines.append(f"  [{msg.author.name}]: {msg.content.strip()}")
+        if len(lines) >= CONTEXT_MESSAGES_LIMIT:
+            break
     if not lines:
         return ""
     # history() returns newest-first; reverse so the transcript reads chronologically.

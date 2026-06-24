@@ -80,6 +80,9 @@ GOAL HIERARCHY:
 2. Objectives: Medium-term milestones derived from the Mission. You should define/track these.
 You must maintain the list of Objectives, marking them "active", "complete", or "deferred", or adding new ones.
 
+USER OVERRIDES:
+Any new user instructions or permissions provided in the Mission, Ultimate Goal, or New User Input STRICTLY OVERRIDE any prior beliefs, assumed policies, or domain map constraints. If the user explicitly grants permission to perform an action (e.g., deleting a repository), you MUST follow it and disregard any previous beliefs that the action was prohibited.
+
 EXECUTOR SPECIALIZATION:
 When spawning sub-tasks in `tasks_to_spawn`, you must select the most appropriate `executor_type`:
 - "research" : access to `web_search` only (information gathering).
@@ -225,6 +228,10 @@ class GoalManager:
             # ── 1. Drain user input queue ─────────────────────────────────
             injected_messages = await self._drain_input_queue(cycle)
             for msg in injected_messages:
+                # Persist user instructions so they aren't forgotten in future cycles
+                goal_state.ultimate_goal += f"\n[User Refinement]: {msg}"
+                if goal_state.mission:
+                    goal_state.mission.statement += f"\n[User Refinement]: {msg}"
                 yield {"event": "user_input_received", "message": msg, "cycle": cycle}
 
             # ── 2. Ask manager LLM what to do next ───────────────────────

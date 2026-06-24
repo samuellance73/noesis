@@ -34,8 +34,8 @@ def _clean_llm_json(raw: str) -> str:
 
     Steps (in order):
     1. Strip <think>…</think> reasoning blocks.
-    2. Extract content from markdown code fences (```json … ```).
-    3. Isolate the outermost JSON object { … }.
+    2. Extract content from markdown code fences wrapping the JSON (if any).
+    3. Isolate the outermost JSON object { … } or list [ … ].
     4. Remove trailing commas before } or ] (invalid in strict JSON).
     """
     clean = raw.strip()
@@ -46,21 +46,43 @@ def _clean_llm_json(raw: str) -> str:
     elif "</think>" in clean:
         clean = clean.split("</think>", 1)[1].strip()
 
-    # 2. Extract from markdown code fences
-    if "```" in clean:
-        blocks = re.findall(r'```(?:json)?\s*(.*?)\s*```', clean, re.DOTALL)
-        if blocks:
-            clean = blocks[0]
-        else:
-            clean = clean.replace("```json", "").replace("```", "").strip()
+    # 2. Extract from markdown code fences wrapping the JSON
+    first_idx = -1
+    for char in ["{", "["]:
+        idx = clean.find(char)
+        if idx != -1 and (first_idx == -1 or idx < first_idx):
+            first_idx = idx
 
-    # 3. Isolate outermost JSON object
-    try:
-        start = clean.index("{")
-        end   = clean.rindex("}") + 1
-        clean = clean[start:end]
-    except ValueError:
-        pass
+    last_idx = -1
+    for char in ["}", "]"]:
+        idx = clean.rfind(char)
+        if idx != -1 and idx > last_idx:
+            last_idx = idx
+
+    if first_idx != -1 and last_idx != -1:
+        first_fence = clean.find("```")
+        last_fence = clean.rfind("```")
+        if first_fence != -1 and first_fence < first_idx and last_fence != -1 and last_fence > last_idx:
+            fence_content = clean[first_fence:last_fence].strip()
+            match = re.match(r'^```(?:json)?\s*(.*)$', fence_content, re.DOTALL)
+            if match:
+                clean = match.group(1).strip()
+
+    # 3. Isolate outermost JSON object/list
+    first_idx = -1
+    for char in ["{", "["]:
+        idx = clean.find(char)
+        if idx != -1 and (first_idx == -1 or idx < first_idx):
+            first_idx = idx
+
+    last_idx = -1
+    for char in ["}", "]"]:
+        idx = clean.rfind(char)
+        if idx != -1 and idx > last_idx:
+            last_idx = idx
+
+    if first_idx != -1 and last_idx != -1:
+        clean = clean[first_idx:last_idx + 1]
 
     # 4. Remove trailing commas
     clean = re.sub(r',(\s*[}\]])', r'\1', clean)

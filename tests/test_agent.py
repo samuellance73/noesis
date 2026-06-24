@@ -134,3 +134,9 @@ def test_parse_agent_step_resilient():
     step = AgentExecutor._parse_agent_step(raw)
     assert step.thought == "think"
     assert step.final_answer == "ans"
+
+    # 6. With nested markdown code fences inside final_answer
+    raw = '```json\n{"thought": "think", "tool_calls": [], "final_answer": "Check this code:\\n```bash\\ncurl -X DELETE\\n```"}\n```'
+    step = AgentExecutor._parse_agent_step(raw)
+    assert step.thought == "think"
+    assert step.final_answer == "Check this code:\n```bash\ncurl -X DELETE\n```"
