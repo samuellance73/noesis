@@ -42,6 +42,9 @@ from integrations.llm.schemas import ChatMessage, ChatPayload
 from utils.tracer import Trace, set_current_trace, current_aspan
 from .executor import AgentExecutor
 from .schemas import GoalState, ManagerDecision, SubTask
+from agents.memory.episodic_store import EpisodicStore
+from agents.memory.episodic_writer import EpisodicWriter
+from agents.critic import score_result
 
 logger = logging.getLogger("noesis.goal_manager")
 
@@ -71,17 +74,21 @@ IMPORTANT: Your Executor agents already have access to a Python environment with
 `TELEGRAM_BOT_TOKEN` pre-loaded. Do NOT ask the user for these tokens; your \
 agents can already use them.
 
-You will receive the current goal state and any new user messages. You must \
-output a single valid JSON object matching this schema:
+You will receive the current goal state (which contains a structured World Model) \
+and any new user messages. You must output a single valid JSON object matching this schema:
 
 {
   "thought": "Your internal reasoning about where the goal stands and what's needed next.",
   "tasks_to_spawn": [
-    {"goal": "Specific sub-task goal", "context": "What the executor needs to know"},
-    ...
+    {"goal": "Specific sub-task goal", "context": "What the executor needs to know"}
   ],
   "progress_update": "A concise status message to show the user (1-2 sentences).",
-  "updated_progress_summary": "Revised summary of what is now known (or null to keep unchanged).",
+  "world_model_patch": {
+    "gaps_closed": ["list of gap strings closed this cycle"],
+    "gaps_added": ["list of new gaps/unknowns discovered this cycle"],
+    "domain_updates": {"topic": "description of what we updated/learned about this topic"},
+    "belief_updates": {"belief claim": 0.9}
+  },
   "updated_open_questions": ["question1", "question2"] or null to keep unchanged,
   "is_goal_complete": false,
   "final_answer": null
@@ -154,6 +161,26 @@ class GoalManager:
 
         goal_state = GoalState(ultimate_goal=ultimate_goal)
         run_log    = RunLogger(goal=ultimate_goal, run_id=trace.id)
+        
+        episodic_store = EpisodicStore()
+        episodic_writer = EpisodicWriter(run_log.run_dir)
+
+        # Working memory priming from Episodic memory
+        prior_runs = episodic_store.load_relevant(ultimate_goal, limit=3)
+        if prior_runs:
+            for run in prior_runs:
+                topic = f"Prior Knowledge (Run ID {run.run_id[:8]})"
+                details = f"Goal: {run.goal}\nFinal Answer: {run.final_answer or 'None'}"
+                goal_state.world_model.domain_map[topic] = details
+                # merge domain map from prior run
+                if run.domain_map:
+                    for k, v in run.domain_map.items():
+                        if not k.startswith("Prior Knowledge"):
+                            goal_state.world_model.domain_map[f"{k} (from run {run.run_id[:8]})"] = v
+                # merge beliefs from prior run
+                if run.beliefs:
+                    for k, v in run.beliefs.items():
+                        goal_state.world_model.beliefs[k] = v
 
         yield {"event": "goal_set", "goal": ultimate_goal}
         logger.info("GoalManager: starting autonomous loop. goal=%r", ultimate_goal)
@@ -193,6 +220,18 @@ class GoalManager:
             # ── 4. Apply manager's state updates ─────────────────────────
             self._apply_state_updates(decision, goal_state, cycle)
 
+            # Write run summary to episodic memory (intermediate cycle update)
+            episodic_writer.write_summary(
+                run_id=trace.id,
+                goal=ultimate_goal,
+                cycle_summaries=goal_state.world_model.cycle_summaries,
+                completed_tasks=[{"goal": ct.goal, "answer": ct.answer} for ct in goal_state.completed],
+                final_answer=decision.final_answer if decision.is_goal_complete else None,
+                is_complete=goal_state.is_complete,
+                domain_map=goal_state.world_model.domain_map,
+                beliefs=goal_state.world_model.beliefs
+            )
+
             # ── 5. Stream progress to caller ──────────────────────────────
             run_log.log_cycle_complete(
                 progress=decision.progress_update,
@@ -215,6 +254,19 @@ class GoalManager:
                 run_log.log_final_answer(final or "(no final answer text)")
                 run_log.log_complete(cycles=cycle, tasks=len(goal_state.completed))
                 trace.done(cycles=cycle, tasks=len(goal_state.completed))
+                
+                # Write final run summary to episodic memory
+                episodic_writer.write_summary(
+                    run_id=trace.id,
+                    goal=ultimate_goal,
+                    cycle_summaries=goal_state.world_model.cycle_summaries,
+                    completed_tasks=[{"goal": ct.goal, "answer": ct.answer} for ct in goal_state.completed],
+                    final_answer=final,
+                    is_complete=True,
+                    domain_map=goal_state.world_model.domain_map,
+                    beliefs=goal_state.world_model.beliefs
+                )
+                
                 yield {
                     "event":           "goal_complete",
                     "cycle":           cycle,
@@ -242,7 +294,7 @@ class GoalManager:
             yield {
                 "event":   "error",
                 "message": f"Autonomous loop reached the cycle limit ({self.max_cycles}) without completing the goal.",
-                "summary": goal_state.progress_summary,
+                "summary": f"Findings: {len(goal_state.world_model.findings)} completed, gaps: {len(goal_state.world_model.gaps)} remaining",
             }
 
     # ── Private helpers ───────────────────────────────────────────────────────
@@ -361,7 +413,9 @@ class GoalManager:
             }
             return
 
-        successful_findings: list[str] = []
+        critic_tasks = []
+        successful_subtasks = []
+
         for item in all_results:
             if isinstance(item, BaseException):
                 logger.error("GoalManager [cycle %d]: subtask raised: %s", cycle, item)
@@ -370,8 +424,8 @@ class GoalManager:
             for ev in events:
                 yield ev
             if result:
-                goal_state.record_success(task_goal, str(result))
-                successful_findings.append(f"Sub-task: {task_goal}\nResult: {result}")
+                successful_subtasks.append((task_goal, result, events))
+                critic_tasks.append(score_result(self.llm_service, self.model, task_goal, str(result)))
             else:
                 goal_state.record_failure(task_goal)
                 failed = next((f for f in goal_state.failed_tasks if f.goal == task_goal), None)
@@ -381,12 +435,18 @@ class GoalManager:
                         cycle, task_goal, failed.attempts, failed.give_up_after,
                     )
 
-        if successful_findings:
-            new_findings = "\n\n".join(successful_findings)
-            if goal_state.progress_summary:
-                goal_state.progress_summary += f"\n\n--- Cycle {cycle} findings ---\n{new_findings}"
-            else:
-                goal_state.progress_summary = new_findings
+        scores = []
+        if critic_tasks:
+            scores = await asyncio.gather(*critic_tasks)
+
+        for (task_goal, result, events), score in zip(successful_subtasks, scores):
+            goal_state.record_success(task_goal, str(result))
+            goal_state.world_model.findings.append({
+                "cycle": cycle,
+                "task_goal": task_goal,
+                "answer": str(result),
+                "quality_score": score
+            })
 
     async def _run_subtask(
         self,
@@ -457,17 +517,26 @@ class GoalManager:
 
     def _apply_state_updates(self, decision: ManagerDecision, goal_state: GoalState, cycle: int) -> None:
         """Apply the manager's optional state field updates."""
-        if decision.updated_progress_summary is not None:
-            # Guard: the manager may not overwrite executor findings.
-            # We append the manager's note so ground-truth results are preserved.
-            if goal_state.progress_summary:
-                goal_state.progress_summary += (
-                    f"\n\n[Manager note, cycle {cycle}]: {decision.updated_progress_summary}"
-                )
-            else:
-                goal_state.progress_summary = decision.updated_progress_summary
+        if decision.world_model_patch is not None:
+            patch = decision.world_model_patch
+            wm = goal_state.world_model
+            # Remove closed gaps
+            wm.gaps = [g for g in wm.gaps if g not in patch.gaps_closed]
+            # Add new gaps
+            wm.gaps.extend(patch.gaps_added)
+            # Update domain map
+            wm.domain_map.update(patch.domain_updates)
+            # Update beliefs
+            wm.beliefs.update(patch.belief_updates)
+
+        # Record cycle summary
+        goal_state.world_model.cycle_summaries.append(
+            f"[Cycle {cycle}] {decision.progress_update}"
+        )
+
         if decision.updated_open_questions is not None:
             goal_state.open_questions = decision.updated_open_questions
+
 
     async def _pace_cycle(self, cycle: int, cycle_start_time: float) -> None:
         """Sleep to enforce the minimum cycle wall-time, if configured."""
@@ -493,8 +562,34 @@ class GoalManager:
             "",
         ]
 
-        if state.progress_summary:
-            lines += ["PROGRESS SO FAR (verified results only):", state.progress_summary, ""]
+        wm = state.world_model
+
+        if wm.domain_map:
+            lines.append("WORLD MODEL - DOMAIN MAP:")
+            for topic, details in wm.domain_map.items():
+                lines.append(f"  * {topic}: {details}")
+            lines.append("")
+
+        if wm.gaps:
+            lines.append("WORLD MODEL - IDENTIFIED GAPS/UNKNOWNS:")
+            for gap in wm.gaps:
+                lines.append(f"  * {gap}")
+            lines.append("")
+
+        if wm.beliefs:
+            lines.append("WORLD MODEL - BELIEFS (confidence 0.0-1.0):")
+            for belief, confidence in wm.beliefs.items():
+                lines.append(f"  * {belief} [confidence: {confidence:.2f}]")
+            lines.append("")
+
+        if wm.findings:
+            lines.append("WORLD MODEL - RECENT FINDINGS (with quality scores):")
+            for finding in wm.findings:
+                score = finding.get("quality_score", 1.0)
+                lines.append(f"  * Task: {finding.get('task_goal', '')}")
+                lines.append(f"    Answer: {finding.get('answer', '')[:300]}")
+                lines.append(f"    Quality Score: {score:.2f}")
+            lines.append("")
 
         if state.completed:
             lines.append("COMPLETED TASKS WITH VERIFIED ANSWERS:")

@@ -94,6 +94,20 @@ class FailedTask(BaseModel):
         return self.attempts >= self.give_up_after
 
 
+class WorldModel(BaseModel):
+    domain_map: dict[str, str] = Field(default_factory=dict)
+    gaps: list[str] = Field(default_factory=list)
+    findings: list[dict] = Field(default_factory=list)
+    beliefs: dict[str, float] = Field(default_factory=dict)
+    # Per-cycle manager notes — used by EpisodicWriter for long-term storage
+    cycle_summaries: list[str] = Field(default_factory=list)
+
+class WorldModelPatch(BaseModel):
+    gaps_closed: list[str] = Field(default_factory=list)
+    gaps_added: list[str] = Field(default_factory=list)
+    domain_updates: dict[str, str] = Field(default_factory=dict)
+    belief_updates: dict[str, float] = Field(default_factory=dict)
+
 class GoalState(BaseModel):
     """
     Persistent state owned by the GoalManager across autonomous cycles.
@@ -102,7 +116,9 @@ class GoalState(BaseModel):
     the agent can store a self-assessment of its own reasoning quality here.
     """
     ultimate_goal: str
-    progress_summary: str = ""
+    cycle: int = 0
+    task_counter: int = 0
+    world_model: WorldModel = Field(default_factory=WorldModel)
     # Completed sub-tasks with their verified answers — kept together so they
     # can never fall out of sync.
     completed: List[CompletedTask] = Field(default_factory=list)
@@ -110,10 +126,7 @@ class GoalState(BaseModel):
     # Surfaced to the manager so it can retry, reframe, or permanently abandon them.
     failed_tasks: List[FailedTask] = Field(default_factory=list)
     open_questions: List[str] = Field(default_factory=list)
-    cycle: int = 0
     is_complete: bool = False
-    # Monotonic task counter — increments across cycles so IDs never reset.
-    task_counter: int = 0
     # Hook for metacognition — populated by a future reflection step
     reflection: Optional[str] = None
 
@@ -138,7 +151,6 @@ class ManagerDecision(BaseModel):
     - If `is_goal_complete` is True the loop stops.
     - If `tasks_to_spawn` is non-empty, executors are launched in parallel.
     - `progress_update` is streamed to the user / UI after each cycle.
-    - `goal_state_update` optionally replaces fields in the current GoalState.
     """
     thought: str = Field(..., description="Manager's internal reasoning about the current state of the goal.")
     tasks_to_spawn: List[SubTask] = Field(
@@ -149,9 +161,9 @@ class ManagerDecision(BaseModel):
         ...,
         description="A human-readable status message to stream to the user after this cycle.",
     )
-    updated_progress_summary: Optional[str] = Field(
+    world_model_patch: Optional[WorldModelPatch] = Field(
         None,
-        description="New value for GoalState.progress_summary (omit to keep unchanged).",
+        description="New patches to apply to the GoalState's WorldModel (omit or leave empty to keep unchanged).",
     )
     updated_open_questions: Optional[List[str]] = Field(
         None,
@@ -165,3 +177,4 @@ class ManagerDecision(BaseModel):
         None,
         description="The complete final response to deliver to the user when is_goal_complete is true.",
     )
+
