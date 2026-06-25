@@ -1,0 +1,45 @@
+# main/config/model_router.yaml
+# Configuration for the ModelRouter - single authority over model selection
+
+tiers:
+  nano:
+    primary: "groq/openai/gpt-oss-120b"
+    fallbacks:
+      - "gemini/gemini-2.0-flash"
+      - "anthropic/claude-haiku-4-5"
+    context_budget: 3000
+    max_response_tokens: 500
+    temperature: 0.1
+    timeout_seconds: 10.0
+
+  standard:
+    primary: "gemini/gemini-2.0-flash"
+    fallbacks:
+      - "anthropic/claude-sonnet-4-6"
+      - "openai/gpt-4o-mini"
+    context_budget: 8000
+    max_response_tokens: 2000
+    temperature: 0.3
+    timeout_seconds: 30.0
+
+  strong:
+    primary: "anthropic/claude-sonnet-4-6"
+    fallbacks:
+      - "openai/gpt-4o"
+      - "gemini/gemini-2.5-pro"
+    context_budget: 32000
+    max_response_tokens: 4000
+    temperature: 0.4
+    timeout_seconds: 60.0
+
+# Retry policy (applies to all tiers)
+retry:
+  max_attempts: 3
+  wait_min_seconds: 1
+  wait_max_seconds: 30
+  retryable_status_codes: [429, 500, 502, 503, 504]
+
+# Budget enforcement
+enforcement:
+  hard_limit: true        # if true, reject prompts over budget before network call
+  truncation_strategy: "tail"   # "tail" = drop oldest messages, "head" = drop newest

@@ -11,3 +11,12 @@ class ChatPayload(BaseModel):
     temperature: float = Field(0.7, ge=0.0, le=2.0, description="Sampling temperature.")
     max_tokens: Optional[int] = Field(None, gt=0, description="Maximum tokens to generate.")
     stream: bool = Field(True, description="Enable Server-Sent Events (SSE) streaming.")
+
+class Usage(BaseModel):
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+
+class ChatCompletionResponse(BaseModel):
+    content: str
+    usage: Usage

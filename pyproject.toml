@@ -12,6 +12,7 @@ dependencies = [
     "pydantic-settings>=2.14.1",
     "pygithub>=2.9.1",
     "python-dotenv>=1.2.2",
+    "pyyaml>=6.0",
     "rich>=13.7.1",
     "tenacity>=9.1.4",
     "uvicorn>=0.49.0",

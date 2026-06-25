@@ -13,6 +13,7 @@ from tenacity import (
 )
 
 from utils.llm_log_formatter import format_chat_block, format_stream_block
+from .schemas import ChatCompletionResponse, Usage
 
 logger     = logging.getLogger(__name__)
 llm_logger = logging.getLogger("noesis.llm")
@@ -60,6 +61,62 @@ class UpstreamService:
 
         llm_logger.info(format_chat_block(payload, data, elapsed))
         return data
+
+    async def chat_completion(
+        self,
+        model: str,
+        messages: list[dict],
+        system: str | None = None,
+        max_tokens: int | None = None,
+        temperature: float = 0.7,
+        timeout: float = 30.0,
+    ) -> ChatCompletionResponse:
+        """Simplified chat completion interface for ModelRouter.
+        
+        Returns a ChatCompletionResponse with content and usage information.
+        This method handles the payload construction and response parsing.
+        """
+        # Build the payload
+        payload = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "stream": False,
+        }
+        
+        if system:
+            payload["messages"].insert(0, {"role": "system", "content": system})
+        
+        if max_tokens:
+            payload["max_tokens"] = max_tokens
+        
+        # Make the call using the existing retry-protected method
+        t0 = time.perf_counter()
+        
+        response = await self.client.post("chat/completions", json=payload, timeout=timeout)
+        response.raise_for_status()
+        data = response.json()
+        elapsed = time.perf_counter() - t0
+        
+        # Log the call
+        llm_logger.info(format_chat_block(payload, data, elapsed))
+        
+        # Extract content and usage
+        choices = data.get("choices", [])
+        if not choices:
+            raise ValueError("No choices returned from API")
+        
+        content = choices[0].get("message", {}).get("content", "")
+        usage_data = data.get("usage", {})
+        
+        return ChatCompletionResponse(
+            content=content,
+            usage=Usage(
+                prompt_tokens=usage_data.get("prompt_tokens", 0),
+                completion_tokens=usage_data.get("completion_tokens", 0),
+                total_tokens=usage_data.get("total_tokens", 0),
+            ),
+        )
 
     async def stream_chat_completion(self, payload: dict) -> AsyncGenerator[str, None]:
         """Stream chat completions with pre-connect retries.
