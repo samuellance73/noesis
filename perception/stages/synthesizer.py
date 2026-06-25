@@ -260,7 +260,7 @@ class Synthesizer:
         )
 
         return PerceptionEvent(
-            summary=signal.representative.text[:200],
+            summary=signal.representative.text,
             type=perception_type,
             urgency=signal.authority_score,  # authority as a proxy for urgency
             authority_score=signal.authority_score,
