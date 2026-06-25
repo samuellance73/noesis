@@ -38,7 +38,7 @@ import logging
 from triggers.store import Trigger, trigger_store
 from agents.executor import AgentExecutor
 from agents.goal_manager import GoalManager
-from integrations.llm.service import UpstreamService
+from core.model_router import ModelRouter
 from utils.event_bus import event_bus
 
 logger = logging.getLogger("noesis.daemon")
@@ -54,7 +54,7 @@ _DAEMON_CYCLE_INTERVAL: float | None = 60.0
 _DAEMON_MAX_ITERATIONS = 5
 
 
-async def _run_trigger(trigger: Trigger, service: UpstreamService) -> None:
+async def _run_trigger(trigger: Trigger, router: ModelRouter) -> None:
     """
     Route one trigger to the appropriate agent, stream events to the bus,
     and update the trigger status when done.
@@ -74,9 +74,9 @@ async def _run_trigger(trigger: Trigger, service: UpstreamService) -> None:
 
     try:
         if trigger.source in ("human", "discord"):
-            await _run_as_goal_manager(trigger, service)
+            await _run_as_goal_manager(trigger, router)
         else:
-            await _run_as_executor(trigger, service)
+            await _run_as_executor(trigger, router)
 
         trigger_store.mark_done(trigger.id)
         logger.info("[Daemon] Trigger %s completed.", trigger.id)
@@ -94,14 +94,13 @@ async def _run_trigger(trigger: Trigger, service: UpstreamService) -> None:
         await _update_discord_reaction(trigger, "❌")
 
 
-async def _run_as_goal_manager(trigger: Trigger, service: UpstreamService) -> None:
+async def _run_as_goal_manager(trigger: Trigger, router: ModelRouter) -> None:
     """
     Human-operator path: full GoalManager loop with sub-task decomposition,
     multi-cycle reasoning, and human-readable run logs under logs/runs/.
     """
     manager = GoalManager(
-        llm_service=service,
-        model=trigger.model,
+        router=router,
         max_cycles=_DAEMON_MAX_CYCLES,
         cycle_interval_seconds=_DAEMON_CYCLE_INTERVAL,
     )
@@ -112,15 +111,14 @@ async def _run_as_goal_manager(trigger: Trigger, service: UpstreamService) -> No
         await event_bus.publish(event)
 
 
-async def _run_as_executor(trigger: Trigger, service: UpstreamService) -> None:
+async def _run_as_executor(trigger: Trigger, router: ModelRouter) -> None:
     """
     Non-human path: lightweight single-turn AgentExecutor — no multi-cycle
     overhead, no run logs written to disk.
     """
     from agents.schemas import AgentState
     executor = AgentExecutor(
-        llm_service=service,
-        model=trigger.model,
+        router=router,
         task_label=f"trigger-{str(trigger.id)[:8]}",
     )
     executor.state = AgentState(max_iterations=_DAEMON_MAX_ITERATIONS)
@@ -167,17 +165,17 @@ async def _update_discord_reaction(trigger: Trigger, emoji: str) -> None:
 
 
 
-async def _process_batch(service: UpstreamService) -> None:
+async def _process_batch(router: ModelRouter) -> None:
     """Drain pending triggers and run them all in parallel."""
     pending = trigger_store.get_pending()
     if not pending:
         return
     logger.info("[Daemon] Processing batch of %d trigger(s).", len(pending))
-    await asyncio.gather(*[_run_trigger(t, service) for t in pending])
+    await asyncio.gather(*[_run_trigger(t, router) for t in pending])
 
 
 async def start_daemon(
-    service: UpstreamService,
+    router: ModelRouter,
     interval_seconds: int = 60,
 ) -> None:
     """
@@ -190,7 +188,7 @@ async def start_daemon(
     regular tick.
 
     To start this, call:
-        asyncio.create_task(start_daemon(service=app.state.upstream_service))
+        asyncio.create_task(start_daemon(router=app.state.model_router))
     """
     logger.info(
         "[Daemon] Starting. Poll interval=%ds. Human triggers fire immediately.",
@@ -215,7 +213,7 @@ async def start_daemon(
             except asyncio.TimeoutError:
                 logger.debug("[Daemon] Woke on poll interval.")
 
-            await _process_batch(service)
+            await _process_batch(router)
 
         except asyncio.CancelledError:
             logger.info("[Daemon] Cancelled — shutting down cleanly.")

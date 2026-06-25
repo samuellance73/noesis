@@ -20,6 +20,7 @@ from fastapi import FastAPI
 
 from integrations.llm.client import get_client
 from integrations.llm.service import UpstreamService
+from core.model_router import ModelRouter, load_config
 from triggers.daemon import start_daemon
 
 logger = logging.getLogger("noesis")
@@ -31,9 +32,12 @@ async def lifespan(app: FastAPI):
         app.state.upstream_client  = client
         app.state.upstream_service = UpstreamService(client)
 
+        router_config = load_config("main/config/model_router.yaml")
+        app.state.model_router     = ModelRouter(router_config, app.state.upstream_service)
+
         # ── Daemon ────────────────────────────────────────────────────────
         daemon_task = asyncio.create_task(
-            start_daemon(service=app.state.upstream_service, interval_seconds=60)
+            start_daemon(router=app.state.model_router, interval_seconds=60)
         )
         app.state.daemon_task = daemon_task
 

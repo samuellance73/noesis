@@ -9,6 +9,7 @@ model, enforces token budgets, and handles fallback chains transparently.
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from enum import Enum
@@ -316,8 +317,6 @@ class ModelRouter:
 
 
 # ── Prompt Budget Guard ─────────────────────────────────────────────────────
-
-import json
 
 def assert_fits_budget(
     content: str,

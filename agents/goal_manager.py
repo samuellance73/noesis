@@ -37,8 +37,7 @@ from typing import Any, AsyncGenerator
 from utils.run_logger import RunLogger
 from utils.json_parser import parse_llm_json
 
-from integrations.llm.service import UpstreamService
-from integrations.llm.schemas import ChatMessage, ChatPayload
+from core.model_router import ModelRouter, ModelRequest, ModelTier
 from utils.tracer import Trace, set_current_trace, current_aspan
 from .executor import AgentExecutor
 from .schemas import GoalState, ManagerDecision, SubTask, Mission, Objective
@@ -140,7 +139,7 @@ class GoalManager:
 
     Usage
     ─────
-        manager = GoalManager(llm_service, model)
+        manager = GoalManager(router)
         async for event in manager.run_stream("Research the top 5 AI papers from 2025"):
             print(event)
 
@@ -152,16 +151,14 @@ class GoalManager:
 
     def __init__(
         self,
-        llm_service: UpstreamService,
-        model: str,
+        router: ModelRouter,
         max_cycles: int = _MAX_CYCLES,
         cycle_interval_seconds: float | None = None,
     ):
-        self.llm_service            = llm_service
-        self.model                  = model
-        self.max_cycles             = max_cycles
-        self.cycle_interval_seconds = cycle_interval_seconds  # min wall-time per cycle
-        self._stop_event            = asyncio.Event()
+        self.router                     = router
+        self.max_cycles                 = max_cycles
+        self.cycle_interval_seconds     = cycle_interval_seconds  # min wall-time per cycle
+        self._stop_event                = asyncio.Event()
         self._input_queue: asyncio.Queue[str] = asyncio.Queue()
 
     # ── Stop control ──────────────────────────────────────────────────────────
@@ -350,29 +347,27 @@ class GoalManager:
         injected_messages: list[str],
         cycle: int,
     ) -> ManagerDecision | None:
-        """Call the manager LLM and parse its decision. Returns None on failure."""
-        async with current_aspan(f"goal_manager[cycle={cycle}]", model=self.model) as span:
-            prompt  = self._build_manager_prompt(goal_state, injected_messages)
-            payload = ChatPayload(
-                model=self.model,
+        """Call the manager LLM (STRONG tier) and parse its decision. Returns None on failure."""
+        model_name = self.router.resolve_model(ModelTier.STRONG)
+        async with current_aspan(f"goal_manager[cycle={cycle}]", model=model_name) as span:
+            prompt = self._build_manager_prompt(goal_state, injected_messages)
+            request = ModelRequest(
+                tier=ModelTier.STRONG,
                 messages=[
-                    ChatMessage(role="system", content=_MANAGER_SYSTEM_PROMPT),
-                    ChatMessage(role="user",   content=prompt),
+                    {"role": "system", "content": _MANAGER_SYSTEM_PROMPT},
+                    {"role": "user",   "content": prompt},
                 ],
-                temperature=0.2,
-                stream=False,
+                component=f"GoalManager.cycle={cycle}",
             )
 
             try:
-                raw_response = await self.llm_service.get_chat_completion(
-                    payload.model_dump(exclude_none=True)
-                )
+                raw_response = await self.router.complete(request)
             except Exception as e:
                 span.log_error(str(e))
                 logger.error("GoalManager [cycle %d]: LLM call failed: %s", cycle, e)
                 return None
 
-            raw_content = raw_response["choices"][0]["message"].get("content") or ""
+            raw_content = raw_response.content
 
             if not raw_content:
                 span.log_error("Manager LLM returned empty/null content.")
@@ -458,7 +453,7 @@ class GoalManager:
                 yield ev
             if result:
                 successful_subtasks.append((task_goal, result, events))
-                critic_tasks.append(score_result(self.llm_service, self.model, task_goal, str(result)))
+                critic_tasks.append(score_result(self.router, task_goal, str(result)))
             else:
                 goal_state.record_failure(task_goal)
                 failed = next((f for f in goal_state.failed_tasks if f.goal == task_goal), None)
@@ -501,8 +496,7 @@ class GoalManager:
 
         registry = build_specialized_registry(task.executor_type)
         executor = AgentExecutor(
-            llm_service=self.llm_service,
-            model=self.model,
+            router=self.router,
             task_label=label,
             registry=registry,
         )

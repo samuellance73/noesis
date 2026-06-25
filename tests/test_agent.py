@@ -1,110 +1,85 @@
 import json
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
-from integrations.llm.service import UpstreamService
+from core.model_router import ModelRouter, ModelResponse, ModelTier
 from agents.executor import AgentExecutor
 from agents.tools import tools_registry
 
+
+def _mock_router(responses: list[str]) -> ModelRouter:
+    """Build a mock ModelRouter whose .complete() returns ModelResponses from content strings."""
+    router = MagicMock(spec=ModelRouter)
+    router.complete = AsyncMock(side_effect=[
+        ModelResponse(
+            content=c,
+            model_used="test-model",
+            tier=ModelTier.STANDARD,
+            prompt_tokens=10,
+            completion_tokens=5,
+            total_tokens=15,
+            latency_ms=1.0,
+        )
+        for c in responses
+    ])
+    router.resolve_model = MagicMock(return_value="test-model")
+    router.config = MagicMock()
+    router.config.tiers = {ModelTier.STANDARD: MagicMock(context_budget=8000)}
+    return router
+
+
 @pytest.mark.asyncio
 async def test_agent_executor_final_answer_directly():
-    # Mock LLM service
-    llm_service = MagicMock(spec=UpstreamService)
-    
-    # LLM returns final answer on first step
-    mock_response = {
-        "choices": [
-            {
-                "message": {
-                    "role": "assistant",
-                    "content": json.dumps({
-                        "thought": "I can answer this directly.",
-                        "tool_calls": [],
-                        "final_answer": "The capital of France is Paris."
-                    })
-                }
-            }
-        ]
-    }
-    llm_service.get_chat_completion = AsyncMock(return_value=mock_response)
+    content = json.dumps({
+        "thought": "I can answer this directly.",
+        "tool_calls": [],
+        "final_answer": "The capital of France is Paris.",
+    })
+    router = _mock_router([content])
 
-    executor = AgentExecutor(llm_service=llm_service, model="test-model")
+    executor = AgentExecutor(router=router)
     result = await executor.run("What is the capital of France?")
-    
+
     assert result == "The capital of France is Paris."
-    llm_service.get_chat_completion.assert_called_once()
+    router.complete.assert_called_once()
 
 
 @pytest.mark.asyncio
 async def test_agent_executor_with_tool_call():
-    # Mock LLM service
-    llm_service = MagicMock(spec=UpstreamService)
-    
-    # First call: agent decides to search
-    mock_response_1 = {
-        "choices": [
-            {
-                "message": {
-                    "role": "assistant",
-                    "content": json.dumps({
-                        "thought": "I need to search for the current weather in Paris.",
-                        "tool_calls": [{
-                            "tool_name": "web_search",
-                            "tool_input": "Paris weather"
-                        }],
-                        "final_answer": None
-                    })
-                }
-            }
-        ]
-    }
-    
-    # Second call: agent uses the search observation to answer
-    mock_response_2 = {
-        "choices": [
-            {
-                "message": {
-                    "role": "assistant",
-                    "content": json.dumps({
-                        "thought": "I have the search results. I can formulate the final answer.",
-                        "tool_calls": [],
-                        "final_answer": "The weather in Paris is sunny and 22 degrees."
-                    })
-                }
-            }
-        ]
-    }
-    
-    llm_service.get_chat_completion = AsyncMock()
-    llm_service.get_chat_completion.side_effect = [mock_response_1, mock_response_2]
+    content_1 = json.dumps({
+        "thought": "I need to search for the current weather in Paris.",
+        "tool_calls": [{"tool_name": "web_search", "tool_input": "Paris weather"}],
+        "final_answer": None,
+    })
+    content_2 = json.dumps({
+        "thought": "I have the search results. I can formulate the final answer.",
+        "tool_calls": [],
+        "final_answer": "The weather in Paris is sunny and 22 degrees.",
+    })
+    router = _mock_router([content_1, content_2])
 
-    # Mock the tool implementation in the registry
     original_tool = tools_registry.tools["web_search"]
     mock_tool = AsyncMock(return_value="Search result placeholder for: Paris weather")
     tools_registry.tools["web_search"] = mock_tool
 
     try:
-        executor = AgentExecutor(llm_service=llm_service, model="test-model")
+        executor = AgentExecutor(router=router)
         result = await executor.run("What is the weather in Paris?")
-        
+
         assert result == "The weather in Paris is sunny and 22 degrees."
-        assert llm_service.get_chat_completion.call_count == 2
-        
-        # Verify the history includes the observation
-        called_payloads = [call[0][0] for call in llm_service.get_chat_completion.call_args_list]
-        
-        # The second payload messages should contain the observation from web_search
-        messages = called_payloads[1]["messages"]
-        # messages[0]: system prompt
-        # messages[1]: user prompt
-        # messages[2]: assistant thought/tool_call
-        # messages[3]: observation
-        assert "OBSERVATIONS:" in messages[3]["content"]
-        assert "Search result placeholder for: Paris weather" in messages[3]["content"]
+        assert router.complete.call_count == 2
+
+        # Verify the second call's messages contain the observation
+        second_call_request: "ModelRequest" = router.complete.call_args_list[1][0][0]
+        messages = second_call_request.messages
+        observation_msg = next(
+            (m for m in messages if m.get("role") == "user" and "OBSERVATIONS:" in m.get("content", "")),
+            None,
+        )
+        assert observation_msg is not None
+        assert "Search result placeholder for: Paris weather" in observation_msg["content"]
     finally:
         tools_registry.tools["web_search"] = original_tool
-
-
 
 
 def test_parse_agent_step_resilient():

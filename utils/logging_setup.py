@@ -86,7 +86,24 @@ def setup_global_logging(console_level=logging.WARNING):
     daemon_logger.addHandler(daemon_handler)
     daemon_logger.propagate = True       # still flows to root → agent.log
 
-    # ── 5. llm.log — Full request/response pairs, one clean block each ────────
+    # ── 5. perception.log — Perception layer signal processing events ──────────
+    #    Captures every batch: raw count, dedup count, per-event routing decisions,
+    #    synthesizer latency, and any fallbacks triggered.
+    #    Tail with:  tail -f logs/perception.log
+    perception_logger = logging.getLogger("noesis.perception")
+    perception_logger.handlers = []     # prevent duplicate lines on reload
+
+    perception_formatter = logging.Formatter(
+        "%(asctime)s  [%(levelname)-5s]  %(message)s", datefmt="%H:%M:%S"
+    )
+    perception_handler = logging.FileHandler("logs/perception.log", mode="w", encoding="utf-8")
+    perception_handler.setLevel(logging.DEBUG)
+    perception_handler.setFormatter(perception_formatter)
+
+    perception_logger.addHandler(perception_handler)
+    perception_logger.propagate = True  # still flows to root → agent.log
+
+    # ── 6. llm.log — Full request/response pairs, one clean block each ────────
     #    The service.py code builds a complete block (request + response +
     #    timing/tokens) and passes it as a single logger.info() call.  We use
     #    a plain %(message)s formatter here so the block is written verbatim —
@@ -102,7 +119,7 @@ def setup_global_logging(console_level=logging.WARNING):
     llm_logger.addHandler(llm_handler)
     llm_logger.propagate = False         # do not spam root logger
 
-    # ── 6. Console — Configurable level, clean short format ───────────────────
+    # ── 7. Console — Configurable level, clean short format ───────────────────
     console_formatter = logging.Formatter("[%(levelname)-8s] %(name)s: %(message)s")
     console_handler = logging.StreamHandler()
     console_handler.setLevel(console_level)

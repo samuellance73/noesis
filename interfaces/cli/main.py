@@ -18,16 +18,15 @@ Lifecycle
 
 import asyncio
 import sys
-import os
 
 from rich.console import Console
 from rich.panel import Panel
 from rich.rule import Rule
-from rich.text import Text
 
 from integrations.llm.service import UpstreamService
-from agents.goal_manager import GoalManager
 from integrations.llm.client import get_client
+from core.model_router import ModelRouter, load_config
+from agents.goal_manager import GoalManager
 
 console = Console()
 
@@ -73,7 +72,6 @@ def _render_event(event: dict) -> None:
         console.print(f"[grey50]  Obs:[/grey50] {cropped}\n")
 
     elif ev == "final_answer":
-        # This is an executor's result for a sub-task
         task_goal = event.get("task_goal", "sub-task")
         console.print(
             Panel(
@@ -133,10 +131,11 @@ async def _input_listener(manager: GoalManager) -> None:
 
 
 async def run_terminal_interface() -> None:
-    default_model = os.getenv("AGENT_MODEL", "groq/openai/gpt-oss-120b")
+    router_config = load_config("main/config/model_router.yaml")
 
     async with get_client(timeout=60.0) as client:
-        service = UpstreamService(client)
+        transport = UpstreamService(client)
+        router    = ModelRouter(router_config, transport)
 
         console.print(
             Panel(
@@ -161,7 +160,7 @@ async def run_terminal_interface() -> None:
                 console.print("[bold red]Goodbye![/bold red]")
                 break
 
-            manager = GoalManager(llm_service=service, model=default_model)
+            manager = GoalManager(router=router)
 
             console.print(f"\n{_STOP_HINT}\n")
 
