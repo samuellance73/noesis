@@ -1,141 +1,156 @@
 """
 perception/stages/router.py
 ────────────────────────────
-Stage 6 — Router
+Stage 5 — Router
 
-Receives the list of PerceptionEvent objects from the Synthesizer and routes
-each one to the appropriate downstream consumer according to the routing matrix
-defined in the spec (§3.6).
+Receives LLM decisions for scored signals and routes each signal to the
+appropriate downstream consumer based on the "action" field from the LLM.
 
-Routing matrix
-──────────────
-  Type        authority   immediate response   to WorldModel   interrupt GM?
-  ─────────   ─────────   ──────────────────   ─────────────   ─────────────
-  DIRECTIVE   any         yes                  yes             if >= 0.75
-  QUERY       any         yes                  no              no
-  INFORMATION any         no                   yes             no
-  CORRECTION  < 0.75      no                   yes             no
-  CORRECTION  >= 0.75     no                   yes             yes
-  FEEDBACK    any         no                   yes             no
-  NOISE       any         no                   no              no
+Routing logic
+─────────────
+  action="interrupt" → Submit to trigger_store and wake GoalManager immediately
+  action="queue"     → Add to WorldModel context for next GoalManager cycle
+  action="drop"      → Ignore entirely
 
 Notes
 ─────
-  • The ReactivePool and WorldModel interfaces are injected at construction time
-    as duck-typed async callables.  This keeps the Router decoupled from
-    concrete GoalManager or pool implementations.
-  • Routing decisions are logged at INFO level for the perception.log file.
+  • The WorldModel interface is injected at construction time as a duck-typed
+    async callable. This keeps the Router decoupled from concrete GoalManager
+    implementations.
+  • Routing decisions are logged at INFO level for the perception.log file..
 """
 
 from __future__ import annotations
 
-import logging
+import os
 from typing import Protocol, runtime_checkable
 
-from perception.schemas import PerceptionEvent, PerceptionType, ResponseJob
-
-logger = logging.getLogger("noesis.perception")
-
-# Authority threshold above which corrections trigger a GoalManager interrupt
-_INTERRUPT_THRESHOLD = 0.75
-
-
-@runtime_checkable
-class ReactivePoolProtocol(Protocol):
-    async def enqueue(self, job: ResponseJob) -> None: ...
+from perception.schemas import ScoredSignal
+from utils.log_writer import emit
 
 
 @runtime_checkable
 class WorldModelProtocol(Protocol):
-    async def absorb(self, event: PerceptionEvent) -> None: ...
-    async def flag_for_interrupt(self, event: PerceptionEvent) -> None: ...
+    async def add_perception_context(self, context: dict) -> None: ...
 
 
 class Router:
     """
-    Routes PerceptionEvents to the ReactivePool and/or WorldModel.
+    Routes signals based on LLM decisions to the WorldModel and/or trigger_store.
 
     Parameters
     ──────────
-    reactive_pool : ReactivePoolProtocol — receives ResponseJob objects for
-                    events that require an immediate response.
-    world_model   : WorldModelProtocol   — receives events the GoalManager
+    world_model   : WorldModelProtocol   — receives context the GoalManager
                     should be aware of on its next cycle.
     """
 
     def __init__(
         self,
-        reactive_pool: ReactivePoolProtocol,
         world_model: WorldModelProtocol,
+        reactive_pool=None,
     ) -> None:
-        self.reactive_pool = reactive_pool
         self.world_model = world_model
+        self._reactive_pool = reactive_pool  # Kept for compatibility but not used in new pipeline
 
-    async def route(self, events: list[PerceptionEvent]) -> None:
-        """Route all events in this perception batch."""
-        for event in events:
-            await self._route_one(event)
+    async def route(self, signals: list[ScoredSignal], decisions: list[dict]) -> None:
+        """Route all signals based on LLM decisions."""
+        for i, decision in enumerate(decisions):
+            if i >= len(signals):
+                emit("perception.warning", "perception", {"msg": f"Router: decision index {i} out of range for signals list"}, level="warn")
+                continue
+            
+            signal = signals[i]
+            await self._route_one(signal, decision)
 
-    async def _route_one(self, event: PerceptionEvent) -> None:
-        etype = event.type
+    async def _route_one(self, signal: ScoredSignal, decision: dict) -> None:
+        action = decision.get("action", "queue")
+        priority = decision.get("priority", "medium")
+        summary = decision.get("summary", signal.representative.text[:100])
+        reason = decision.get("reason", "")
 
-        # ── NOISE: drop immediately ────────────────────────────────────────────
-        if etype == PerceptionType.NOISE:
-            logger.info(
-                "Router: DROP  event_id=%s  type=noise  authority=%.2f",
-                event.id, event.authority_score,
+        # ── DROP: ignore entirely ───────────────────────────────────────────────
+        if action == "drop":
+            emit(
+                event="perception.routed",
+                layer="perception",
+                data={
+                    "action": "drop",
+                    "signal_id": signal.id,
+                    "authority": signal.authority_score,
+                    "reason": reason,
+                }
             )
             return
 
-        # ── Compute routing flags from matrix ──────────────────────────────────
-        send_to_reactive = event.requires_immediate_response
-        send_to_world = False
-        interrupt_gm = False
-
-        if etype == PerceptionType.DIRECTIVE:
-            send_to_reactive = True
-            send_to_world = True
-            interrupt_gm = event.authority_score >= _INTERRUPT_THRESHOLD
-
-        elif etype == PerceptionType.QUERY:
-            send_to_reactive = True
-            send_to_world = False
-            interrupt_gm = False
-
-        elif etype == PerceptionType.INFORMATION:
-            send_to_reactive = False
-            send_to_world = True
-            interrupt_gm = False
-
-        elif etype == PerceptionType.CORRECTION:
-            send_to_reactive = False
-            send_to_world = True
-            interrupt_gm = event.authority_score >= _INTERRUPT_THRESHOLD
-
-        elif etype == PerceptionType.FEEDBACK:
-            send_to_reactive = False
-            send_to_world = True
-            interrupt_gm = False
-
-        # ── Dispatch ───────────────────────────────────────────────────────────
-        if send_to_reactive:
-            job = ResponseJob(event=event, priority=event.urgency)
-            await self.reactive_pool.enqueue(job)
-            logger.info(
-                "Router: REACTIVE  event_id=%s  type=%s  urgency=%.2f  job_id=%s",
-                event.id, etype.value, event.urgency, job.id,
+        # ── INTERRUPT: wake GoalManager immediately ───────────────────────────────
+        if action == "interrupt":
+            from triggers.store import trigger_store
+            model = os.getenv("AGENT_MODEL", "groq/openai/gpt-oss-120b")
+            
+            trigger_store.submit(
+                description=summary,
+                source="perception",
+                model=model,
+                metadata={
+                    "original_signal": signal.representative.text,
+                    "channel": signal.representative.channel_id,
+                    "authority": signal.authority_score,
+                    "priority": priority,
+                }
             )
-
-        if send_to_world:
-            await self.world_model.absorb(event)
-            logger.info(
-                "Router: WORLD_MODEL  event_id=%s  type=%s  authority=%.2f",
-                event.id, etype.value, event.authority_score,
+            trigger_store.human_ready.set()
+            
+            emit(
+                event="perception.routed",
+                layer="perception",
+                data={
+                    "action": "interrupt",
+                    "signal_id": signal.id,
+                    "authority": signal.authority_score,
+                    "priority": priority,
+                    "summary": summary[:120],
+                }
             )
+            return
 
-        if interrupt_gm:
-            await self.world_model.flag_for_interrupt(event)
-            logger.info(
-                "Router: INTERRUPT_FLAG  event_id=%s  type=%s  authority=%.2f",
-                event.id, etype.value, event.authority_score,
+        # ── QUEUE: add to WorldModel context for next GoalManager cycle ─────────
+        if action == "queue":
+            await self.world_model.add_perception_context({
+                "text": signal.representative.text,
+                "source": signal.representative.source.identifier,
+                "channel": signal.representative.channel_id,
+                "summary": summary,
+                "priority": priority,
+                "authority": signal.authority_score,
+            })
+            
+            emit(
+                event="perception.routed",
+                layer="perception",
+                data={
+                    "action": "queue",
+                    "signal_id": signal.id,
+                    "authority": signal.authority_score,
+                    "priority": priority,
+                    "summary": summary[:120],
+                }
             )
+            return
+
+        # ── Unknown action: default to queue ───────────────────────────────────────
+        emit(
+            event="perception.warning",
+            layer="perception",
+            level="warn",
+            data={
+                "msg": f"Router: Unknown action '{action}' for signal_id={signal.id}, defaulting to queue"
+            }
+        )
+        await self.world_model.add_perception_context({
+            "text": signal.representative.text,
+            "source": signal.representative.source.identifier,
+            "channel": signal.representative.channel_id,
+            "summary": summary,
+            "priority": priority,
+            "authority": signal.authority_score,
+        })

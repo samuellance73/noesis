@@ -1,22 +1,17 @@
-import logging
 import time
 from typing import AsyncGenerator
 
 import httpx2
 from tenacity import (
     RetryError,
-    before_sleep_log,
     retry,
     retry_if_exception,
     stop_after_attempt,
     wait_exponential,
 )
 
-from utils.llm_log_formatter import format_chat_block, format_stream_block
 from .schemas import ChatCompletionResponse, Usage
-
-logger     = logging.getLogger(__name__)
-llm_logger = logging.getLogger("noesis.llm")
+from utils.log_writer import emit
 
 
 def _is_retryable(exc: BaseException) -> bool:
@@ -32,7 +27,6 @@ _retry_policy = dict(
     retry=retry_if_exception(_is_retryable),
     stop=stop_after_attempt(4),
     wait=wait_exponential(multiplier=1, min=1, max=30),
-    before_sleep=before_sleep_log(logger, logging.WARNING),
     reraise=True,
 )
 
@@ -59,7 +53,6 @@ class UpstreamService:
         data    = response.json()
         elapsed = time.perf_counter() - t0
 
-        llm_logger.info(format_chat_block(payload, data, elapsed))
         return data
 
     async def chat_completion(
@@ -97,9 +90,6 @@ class UpstreamService:
         response.raise_for_status()
         data = response.json()
         elapsed = time.perf_counter() - t0
-        
-        # Log the call
-        llm_logger.info(format_chat_block(payload, data, elapsed))
         
         # Extract content and usage
         choices = data.get("choices", [])
@@ -153,11 +143,20 @@ class UpstreamService:
                         raw_lines.append(line)
 
                 elapsed = time.perf_counter() - t0
-                llm_logger.info(format_stream_block(payload, raw_lines, elapsed))
+                emit(
+                    event="llm.stream_complete",
+                    layer="llm",
+                    level="debug",
+                    data={
+                        "model": payload.get("model"),
+                        "elapsed_ms": elapsed * 1000,
+                        "content": "".join(raw_lines),
+                    }
+                )
 
         except RetryError as exc:
-            logger.error("Stream connect failed after retries: %s", exc)
+            emit("transport.error", "transport", {"msg": f"Stream connect failed after retries: {exc}"}, level="error")
             yield 'data: {"error": "Upstream unavailable after retries."}\n\n'
         except Exception as exc:
-            logger.error("Streaming failed: %s", exc, exc_info=True)
+            emit("transport.error", "transport", {"msg": f"Streaming failed: {exc}"}, level="error")
             yield f'data: {{"error": "Streaming interruption occurred: {exc}"}}\n\n'

@@ -1,13 +1,10 @@
 import inspect
-import logging
 import sys
 import asyncio
 import httpx2
 from typing import Dict, Any, Callable
 from integrations.llm.config import settings
-from utils.tracer import traced_tool
-
-logger = logging.getLogger(__name__)
+from utils.log_writer import emit
 
 
 class ToolRegistry:
@@ -23,7 +20,7 @@ class ToolRegistry:
 
     async def execute(self, name: str, arg: Any) -> str:
         if name not in self.tools:
-            logger.warning("Unknown tool requested: %r  available=%s", name, list(self.tools.keys()))
+            emit("tactical.warning", "tactical", {"msg": f"Unknown tool requested: {name!r}  available={list(self.tools.keys())}"}, level="warn")
             return f"Error: Tool '{name}' is not available."
         try:
             func = self.tools[name]
@@ -33,7 +30,7 @@ class ToolRegistry:
                 result = func(arg)
             return str(result)
         except Exception as e:
-            logger.error("Error executing tool %r: %s", name, e, exc_info=True)
+            emit("tactical.error", "tactical", {"msg": f"Error executing tool {name!r}: {e}"}, level="error")
             return f"Error executing tool: {str(e)}"
 
 
@@ -44,7 +41,6 @@ tools_registry = ToolRegistry()
     "web_search",
     description="Perform a web search using Tavily API. Useful for finding current information on the internet.",
 )
-@traced_tool("web_search", input_arg="query")
 async def web_search(query: str) -> str:
     tavily_api_key = settings.tavily_api_key
     if not tavily_api_key:
@@ -94,7 +90,6 @@ async def web_search(query: str) -> str:
         "- os.environ.get('TELEGRAM_BOT_TOKEN') is pre-loaded with your Telegram bot key."
     ),
 )
-@traced_tool("python_execute", input_arg="code")
 async def python_execute(code: str) -> str:
     try:
         process = await asyncio.create_subprocess_exec(
@@ -120,9 +115,9 @@ async def python_execute(code: str) -> str:
         stderr_str = stderr.decode("utf-8")
 
         if stdout_str:
-            logger.info("[python_execute stdout]\n%s", stdout_str.rstrip())
+            emit("tactical.tool_output", "tactical", {"tool": "python_execute", "stream": "stdout", "content": stdout_str.rstrip()}, level="debug")
         if stderr_str:
-            logger.warning("[python_execute stderr]\n%s", stderr_str.rstrip())
+            emit("tactical.tool_output", "tactical", {"tool": "python_execute", "stream": "stderr", "content": stderr_str.rstrip()}, level="warn")
 
         if process.returncode != 0:
             return f"Error: Process exited with code {process.returncode}\nStdout:\n{stdout_str}\nStderr:\n{stderr_str}"
@@ -145,7 +140,6 @@ async def python_execute(code: str) -> str:
     "run_command",
     description="Run a shell command in the terminal and return its output (stdout and stderr).",
 )
-@traced_tool("run_command", input_arg="command")
 async def run_command(command: str) -> str:
     try:
         process = await asyncio.create_subprocess_shell(
@@ -170,9 +164,9 @@ async def run_command(command: str) -> str:
         stderr_str = stderr.decode("utf-8", errors="replace")
 
         if stdout_str:
-            logger.info("[run_command stdout]\n%s", stdout_str.rstrip())
+            emit("tactical.tool_output", "tactical", {"tool": "run_command", "stream": "stdout", "content": stdout_str.rstrip()}, level="debug")
         if stderr_str:
-            logger.warning("[run_command stderr]\n%s", stderr_str.rstrip())
+            emit("tactical.tool_output", "tactical", {"tool": "run_command", "stream": "stderr", "content": stderr_str.rstrip()}, level="warn")
 
         if process.returncode != 0:
             return f"Error: Command exited with code {process.returncode}\nStdout:\n{stdout_str}\nStderr:\n{stderr_str}"
@@ -195,7 +189,6 @@ async def run_command(command: str) -> str:
     "send_discord_message",
     description="Send a message to a specific Discord channel. Input must be a JSON string with 'channel_id' (integer) and 'message' (string), e.g. {\"channel_id\": 123456789, \"message\": \"Hello!\"}",
 )
-@traced_tool("send_discord_message", input_arg="payload_json")
 async def send_discord_message(payload_json: str) -> str:
     import json
     try:

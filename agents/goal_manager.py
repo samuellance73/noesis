@@ -31,22 +31,18 @@ Stop from outside
 """
 
 import asyncio
-import logging
 from typing import Any, AsyncGenerator
 
-from utils.run_logger import RunLogger
 from utils.json_parser import parse_llm_json
+from utils.log_writer import emit, clear_log
 
 from core.model_router import ModelRouter, ModelRequest, ModelTier
-from utils.tracer import Trace, set_current_trace, current_aspan
 from .executor import AgentExecutor
 from .schemas import GoalState, ManagerDecision, SubTask, Mission, Objective
 from .tools import build_specialized_registry
 from agents.memory.episodic_store import EpisodicStore
 from agents.memory.episodic_writer import EpisodicWriter
 from agents.critic import score_result
-
-logger = logging.getLogger("noesis.goal_manager")
 
 # Safety cap — even a fully autonomous agent shouldn't run forever.
 _MAX_CYCLES = 5
@@ -165,7 +161,7 @@ class GoalManager:
 
     def request_stop(self) -> None:
         """Signal the loop to stop after the current cycle finishes."""
-        logger.info("GoalManager: stop requested.")
+        emit("strategic.stop_requested", "strategic", {})
         self._stop_event.set()
 
     async def inject_input(self, text: str) -> None:
@@ -181,15 +177,22 @@ class GoalManager:
     # ── Main autonomous loop ──────────────────────────────────────────────────
 
     async def run_stream(self, ultimate_goal: str) -> AsyncGenerator[dict, None]:
-        trace = Trace(query=ultimate_goal)
-        set_current_trace(trace)
-
+        import uuid
+        run_id = str(uuid.uuid4())[:8]
+        
+        # Clear agent.jsonl at start of new autonomous run
+        clear_log()
+        
         goal_state = GoalState(ultimate_goal=ultimate_goal)
         goal_state.mission = Mission(statement=ultimate_goal, domain="general")
-        run_log    = RunLogger(goal=ultimate_goal, run_id=trace.id)
+        
+        from pathlib import Path
+        runs_root = Path("logs") / "runs"
+        run_dir = runs_root / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
         
         episodic_store = EpisodicStore()
-        episodic_writer = EpisodicWriter(run_log.run_dir)
+        episodic_writer = EpisodicWriter(run_dir)
 
         # Working memory priming from Episodic memory
         prior_runs = episodic_store.load_relevant(ultimate_goal, limit=3)
@@ -209,17 +212,17 @@ class GoalManager:
                         goal_state.world_model.beliefs[k] = v
 
         yield {"event": "goal_set", "goal": ultimate_goal}
-        logger.info("GoalManager: starting autonomous loop. goal=%r", ultimate_goal)
+        emit("strategic.loop_started", "strategic", {"goal": ultimate_goal}, run_id=run_id)
 
         for cycle in range(1, self.max_cycles + 1):
             if self._stop_event.is_set():
-                logger.info("GoalManager: stop signal received before cycle %d.", cycle)
+                emit("strategic.stop_signal_received", "strategic", {"cycle": cycle}, run_id=run_id)
                 yield {"event": "stopped", "cycle": cycle, "reason": "stop_requested"}
                 break
 
             cycle_start_time = asyncio.get_event_loop().time()
             goal_state.cycle = cycle
-            run_log.log_cycle_start(cycle)
+            emit("strategic.cycle_start", "strategic", {"cycle": cycle}, run_id=run_id)
             yield {"event": "cycle_start", "cycle": cycle}
 
             # ── 1. Drain user input queue ─────────────────────────────────
@@ -232,18 +235,18 @@ class GoalManager:
                 yield {"event": "user_input_received", "message": msg, "cycle": cycle}
 
             # ── 2. Ask manager LLM what to do next ───────────────────────
-            decision = await self._get_manager_decision(goal_state, injected_messages, cycle)
+            decision = await self._get_manager_decision(goal_state, injected_messages, cycle, run_id)
             if decision is None:
                 return  # error already yielded inside helper
 
             # Yield the decision events separately to keep run_stream a clean generator
-            async for event in self._yield_decision_events(decision, cycle, run_log):
+            async for event in self._yield_decision_events(decision, cycle, run_id):
                 yield event
 
             # ── 3. Spawn executors in parallel ────────────────────────────
             if decision.tasks_to_spawn and not decision.is_goal_complete:
                 async for event in self._run_subtask_batch(
-                    decision.tasks_to_spawn, goal_state, run_log, cycle
+                    decision.tasks_to_spawn, goal_state, run_id, cycle
                 ):
                     yield event
 
@@ -252,7 +255,7 @@ class GoalManager:
 
             # Write run summary to episodic memory (intermediate cycle update)
             episodic_writer.write_summary(
-                run_id=trace.id,
+                run_id=run_id,
                 goal=ultimate_goal,
                 cycle_summaries=goal_state.world_model.cycle_summaries,
                 completed_tasks=[{"goal": ct.goal, "answer": ct.answer} for ct in goal_state.completed],
@@ -263,11 +266,12 @@ class GoalManager:
             )
 
             # ── 5. Stream progress to caller ──────────────────────────────
-            run_log.log_cycle_complete(
-                progress=decision.progress_update,
-                completed=[t.goal for t in goal_state.completed],
-                failed=[f.goal for f in goal_state.failed_tasks],
-            )
+            emit("strategic.cycle_complete", "strategic", {
+                "progress": decision.progress_update,
+                "completed": [t.goal for t in goal_state.completed],
+                "failed": [f.goal for f in goal_state.failed_tasks],
+                "cycle": cycle
+            }, run_id=run_id)
             yield {
                 "event":            "cycle_complete",
                 "cycle":            cycle,
@@ -279,15 +283,13 @@ class GoalManager:
             # ── 6. Check completion ───────────────────────────────────────
             if decision.is_goal_complete:
                 goal_state.is_complete = True
-                logger.info("GoalManager: goal declared complete after %d cycle(s).", cycle)
+                emit("strategic.goal_complete", "strategic", {"cycle": cycle}, run_id=run_id)
                 final = decision.final_answer or decision.progress_update
-                run_log.log_final_answer(final or "(no final answer text)")
-                run_log.log_complete(cycles=cycle, tasks=len(goal_state.completed))
-                trace.done(cycles=cycle, tasks=len(goal_state.completed))
+                emit("strategic.final_answer", "strategic", {"answer": final, "cycles": cycle, "tasks": len(goal_state.completed)}, run_id=run_id)
                 
                 # Write final run summary to episodic memory
                 episodic_writer.write_summary(
-                    run_id=trace.id,
+                    run_id=run_id,
                     goal=ultimate_goal,
                     cycle_summaries=goal_state.world_model.cycle_summaries,
                     completed_tasks=[{"goal": ct.goal, "answer": ct.answer} for ct in goal_state.completed],
@@ -319,8 +321,8 @@ class GoalManager:
 
         # Reached max cycles without completion
         if not goal_state.is_complete:
-            logger.warning("GoalManager: max cycles (%d) reached without goal completion.", self.max_cycles)
-            run_log.log_error(f"Max cycles ({self.max_cycles}) reached without completing the goal.")
+            emit("strategic.max_cycles_reached", "strategic", {"max_cycles": self.max_cycles}, level="warn", run_id=run_id)
+            emit("strategic.error", "strategic", {"msg": f"Max cycles ({self.max_cycles}) reached without completing the goal."}, level="error", run_id=run_id)
             yield {
                 "event":   "error",
                 "message": f"Autonomous loop reached the cycle limit ({self.max_cycles}) without completing the goal.",
@@ -336,7 +338,7 @@ class GoalManager:
             try:
                 msg = self._input_queue.get_nowait()
                 messages.append(msg)
-                logger.info("GoalManager: user refinement injected: %r", msg)
+                emit("strategic.user_input_injected", "strategic", {"msg": msg, "cycle": cycle})
             except asyncio.QueueEmpty:
                 break
         return messages
@@ -346,53 +348,59 @@ class GoalManager:
         goal_state: GoalState,
         injected_messages: list[str],
         cycle: int,
+        run_id: str,
     ) -> ManagerDecision | None:
         """Call the manager LLM (STRONG tier) and parse its decision. Returns None on failure."""
         model_name = self.router.resolve_model(ModelTier.STRONG)
-        async with current_aspan(f"goal_manager[cycle={cycle}]", model=model_name) as span:
-            prompt = self._build_manager_prompt(goal_state, injected_messages)
-            request = ModelRequest(
-                tier=ModelTier.STRONG,
-                messages=[
-                    {"role": "system", "content": _MANAGER_SYSTEM_PROMPT},
-                    {"role": "user",   "content": prompt},
-                ],
-                component=f"GoalManager.cycle={cycle}",
-            )
+        emit("llm.request", "llm", {"model": model_name, "tier": "STRONG", "component": f"GoalManager.cycle={cycle}"}, level="debug", run_id=run_id)
+        
+        prompt = self._build_manager_prompt(goal_state, injected_messages)
+        request = ModelRequest(
+            tier=ModelTier.STRONG,
+            messages=[
+                {"role": "system", "content": _MANAGER_SYSTEM_PROMPT},
+                {"role": "user",   "content": prompt},
+            ],
+            component=f"GoalManager.cycle={cycle}",
+        )
 
-            try:
-                raw_response = await self.router.complete(request)
-            except Exception as e:
-                span.log_error(str(e))
-                logger.error("GoalManager [cycle %d]: LLM call failed: %s", cycle, e)
-                return None
+        import time
+        start = time.perf_counter()
+        try:
+            raw_response = await self.router.complete(request)
+        except Exception as e:
+            elapsed_ms = (time.perf_counter() - start) * 1000
+            emit("llm.response", "llm", {"model": model_name, "elapsed_ms": elapsed_ms, "error": str(e)}, level="error", run_id=run_id)
+            emit("strategic.error", "strategic", {"msg": f"LLM call failed: {e}", "cycle": cycle}, level="error", run_id=run_id)
+            return None
 
-            raw_content = raw_response.content
+        elapsed_ms = (time.perf_counter() - start) * 1000
+        raw_content = raw_response.content
 
-            if not raw_content:
-                span.log_error("Manager LLM returned empty/null content.")
-                logger.error("GoalManager [cycle %d]: empty LLM content.", cycle)
-                return None
+        if not raw_content:
+            emit("llm.response", "llm", {"model": model_name, "elapsed_ms": elapsed_ms, "error": "empty content"}, level="error", run_id=run_id)
+            emit("strategic.error", "strategic", {"msg": "empty LLM content.", "cycle": cycle}, level="error", run_id=run_id)
+            return None
 
-            try:
-                decision = _parse_manager_decision(raw_content)
-            except Exception as e:
-                span.log_error(f"Parse failure: {e}")
-                logger.error("GoalManager [cycle %d]: parse failure: %s", cycle, e)
-                return None
+        try:
+            decision = _parse_manager_decision(raw_content)
+        except Exception as e:
+            emit("llm.response", "llm", {"model": model_name, "elapsed_ms": elapsed_ms, "error": f"parse failure: {e}"}, level="error", run_id=run_id)
+            emit("strategic.error", "strategic", {"msg": f"parse failure: {e}", "cycle": cycle}, level="error", run_id=run_id)
+            return None
 
-            logger.info("GoalManager [cycle %d] thought: %s", cycle, decision.thought)
-            span.log_close(status="ok")
-            return decision
+        emit("llm.response", "llm", {"model": model_name, "elapsed_ms": elapsed_ms, "usage": getattr(raw_response, 'usage', None)}, level="debug", run_id=run_id)
+        emit("strategic.thought", "strategic", {"thought": decision.thought, "cycle": cycle}, run_id=run_id)
+        return decision
 
     async def _yield_decision_events(
         self,
         decision: ManagerDecision,
         cycle: int,
-        run_log: RunLogger,
+        run_id: str,
     ) -> AsyncGenerator[dict, None]:
         """Yield events derived from the manager's decision."""
-        run_log.log_manager_thought(decision.thought)
+        emit("strategic.manager_thought", "strategic", {"thought": decision.thought, "cycle": cycle}, run_id=run_id)
         yield {
             "event":   "manager_thought",
             "thought": decision.thought,
@@ -400,7 +408,7 @@ class GoalManager:
         }
 
         if decision.tasks_to_spawn and not decision.is_goal_complete:
-            run_log.log_spawning([t.goal for t in decision.tasks_to_spawn])
+            emit("strategic.plan_received", "strategic", {"tasks": [t.goal for t in decision.tasks_to_spawn], "cycle": cycle}, run_id=run_id)
             yield {
                 "event":  "spawning_tasks",
                 "count":  len(decision.tasks_to_spawn),
@@ -412,7 +420,7 @@ class GoalManager:
         self,
         tasks: list[SubTask],
         goal_state: GoalState,
-        run_log: RunLogger,
+        run_id: str,
         cycle: int,
     ) -> AsyncGenerator[dict, None]:
         """Run all sub-tasks in parallel and stream their events."""
@@ -420,7 +428,7 @@ class GoalManager:
         for task in tasks:
             goal_state.task_counter += 1
             coroutines.append(
-                self._run_subtask(task, len(coroutines), goal_state.task_counter, cycle, run_log)
+                self._run_subtask(task, len(coroutines), goal_state.task_counter, cycle, run_id)
             )
 
         try:
@@ -429,10 +437,7 @@ class GoalManager:
                 timeout=_CYCLE_TIMEOUT_SECONDS,
             )
         except asyncio.TimeoutError:
-            logger.error(
-                "GoalManager [cycle %d]: subtask batch timed out after %ds.",
-                cycle, _CYCLE_TIMEOUT_SECONDS,
-            )
+            emit("strategic.error", "strategic", {"msg": f"subtask batch timed out after {_CYCLE_TIMEOUT_SECONDS}s.", "cycle": cycle}, level="error", run_id=run_id)
             yield {
                 "event":   "error",
                 "message": f"Cycle {cycle} subtasks timed out after {_CYCLE_TIMEOUT_SECONDS}s. "
@@ -446,7 +451,7 @@ class GoalManager:
 
         for item in all_results:
             if isinstance(item, BaseException):
-                logger.error("GoalManager [cycle %d]: subtask raised: %s", cycle, item)
+                emit("strategic.error", "strategic", {"msg": f"subtask raised: {item}", "cycle": cycle}, level="error", run_id=run_id)
                 continue
             task_goal, result, events = item
             for ev in events:
@@ -458,10 +463,7 @@ class GoalManager:
                 goal_state.record_failure(task_goal)
                 failed = next((f for f in goal_state.failed_tasks if f.goal == task_goal), None)
                 if failed:
-                    logger.warning(
-                        "GoalManager [cycle %d]: task %r failed (attempt %d/%d).",
-                        cycle, task_goal, failed.attempts, failed.give_up_after,
-                    )
+                    emit("strategic.warning", "strategic", {"msg": f"task {task_goal!r} failed (attempt {failed.attempts}/{failed.give_up_after}).", "cycle": cycle}, level="warn", run_id=run_id)
 
         scores = []
         if critic_tasks:
@@ -482,7 +484,7 @@ class GoalManager:
         task_idx: int,
         global_task_id: int,
         cycle: int,
-        run_log: RunLogger,
+        run_id: str,
     ) -> tuple[str, Any, list[dict]]:
         """Run one sub-task through a fresh AgentExecutor and collect results."""
         enriched = (
@@ -491,8 +493,8 @@ class GoalManager:
             else task.goal
         )
         label    = f"task-{global_task_id}"
-        task_log = run_log.open_task_log(global_task_id, task.goal, task.context, cycle)
-        logger.info("[%s] SPAWN  cycle=%d  goal=%r", label, cycle, task.goal)
+        task_id  = f"task-{global_task_id}"
+        emit("strategic.task_spawned", "strategic", {"label": label, "cycle": cycle, "goal": task.goal}, run_id=run_id, task_id=task_id)
 
         registry = build_specialized_registry(task.executor_type)
         executor = AgentExecutor(
@@ -508,7 +510,7 @@ class GoalManager:
             ev["task_index"] = task_idx
             ev["task_goal"]  = task.goal
             events.append(ev)
-            self._log_executor_event(ev, label, task_log)
+            self._log_executor_event(ev, label, task_id, run_id)
             if ev["event"] == "final_answer":
                 result = ev["answer"]
 
@@ -516,33 +518,28 @@ class GoalManager:
             (ev.get("step_index", 0) + 1 for ev in events if "step_index" in ev),
             default=0,
         )
-        task_log.close(success=result is not None, iterations=iterations)
+        emit("strategic.task_complete", "strategic", {"label": label, "success": result is not None, "iterations": iterations}, run_id=run_id, task_id=task_id)
 
         if result is None:
-            logger.warning("[%s] DONE  no final_answer produced  goal=%r", label, task.goal)
+            emit("strategic.warning", "strategic", {"msg": f"[{label}] DONE  no final_answer produced  goal={task.goal!r}"}, level="warn", run_id=run_id, task_id=task_id)
 
         return task.goal, result, events
 
     @staticmethod
-    def _log_executor_event(ev: dict, label: str, task_log: Any) -> None:
-        """Route a single executor event to the appropriate task log method."""
+    def _log_executor_event(ev: dict, label: str, task_id: str, run_id: str) -> None:
+        """Route a single executor event to the appropriate emit call."""
         etype = ev["event"]
         if etype == "thought":
             iter_num = ev.get("step_index", 0) + 1
-            task_log.log_thought(ev.get("thought", ""), iter_num)
-            logger.info("[%s] thought: %s", label, ev.get("thought", "")[:200])
+            emit("tactical.thought", "tactical", {"thought": ev.get("thought", ""), "iteration": iter_num}, run_id=run_id, task_id=task_id)
         elif etype == "tool_start":
-            task_log.log_tool_call(ev.get("tool_name", ""), str(ev.get("tool_input", "")))
-            logger.info("[%s] tool_call: %s  input=%r", label, ev.get("tool_name"), ev.get("tool_input"))
+            emit("tactical.tool_call", "tactical", {"tool": ev.get("tool_name", ""), "input": str(ev.get("tool_input", ""))}, run_id=run_id, task_id=task_id)
         elif etype == "tool_observation":
-            task_log.log_tool_result(ev.get("tool_name", ""), str(ev.get("observation", "")))
-            logger.info("[%s] tool_result (%s): %s", label, ev.get("tool_name"), str(ev.get("observation", ""))[:200])
+            emit("tactical.tool_result", "tactical", {"tool": ev.get("tool_name", ""), "result": str(ev.get("observation", ""))[:80]}, run_id=run_id, task_id=task_id)
         elif etype == "final_answer":
-            task_log.log_final_answer(str(ev.get("answer", "")))
-            logger.info("[%s] DONE  answer: %s", label, str(ev.get("answer", ""))[:200])
+            emit("tactical.final_answer", "tactical", {"answer": str(ev.get("answer", ""))}, run_id=run_id, task_id=task_id)
         elif etype == "error":
-            task_log.log_error(ev.get("message", ""))
-            logger.error("[%s] ERROR: %s", label, ev.get("message"))
+            emit("tactical.error", "tactical", {"msg": ev.get("message", "")}, level="error", run_id=run_id, task_id=task_id)
 
     def _apply_state_updates(self, decision: ManagerDecision, goal_state: GoalState, cycle: int) -> None:
         """Apply the manager's optional state field updates."""
@@ -577,9 +574,16 @@ class GoalManager:
         elapsed  = asyncio.get_event_loop().time() - cycle_start_time
         throttle = self.cycle_interval_seconds - elapsed
         if throttle > 0:
-            logger.info(
-                "GoalManager [cycle %d] finished in %.1fs — sleeping %.1fs to meet %ds interval.",
-                cycle, elapsed, throttle, self.cycle_interval_seconds,
+            emit(
+                event="strategic.cycle_throttle",
+                layer="strategic",
+                data={
+                    "cycle": cycle,
+                    "elapsed": elapsed,
+                    "throttle": throttle,
+                    "interval": self.cycle_interval_seconds,
+                },
+                run_id=run_id
             )
             await asyncio.sleep(throttle)
 

@@ -24,13 +24,11 @@ Each DeduplicatedSignal carries:
 
 from __future__ import annotations
 
-import logging
 import re
 from datetime import timedelta
 
 from perception.schemas import DeduplicatedSignal, RawSignal
-
-logger = logging.getLogger("noesis.perception")
+from utils.log_writer import emit
 
 # Secondary-key proximity window: two signals in the same channel that arrive
 # within this many seconds are considered "contextually related" for grouping.
@@ -94,9 +92,15 @@ class Deduplicator:
                 )
             )
 
-        logger.debug(
-            "Deduplicator: %d raw → %d deduplicated groups (threshold=%.2f)",
-            len(signals), len(result), self.similarity_threshold,
+        emit(
+            event="perception.deduped",
+            layer="perception",
+            level="debug",
+            data={
+                "raw_count": len(signals),
+                "deduped_count": len(result),
+                "threshold": self.similarity_threshold,
+            }
         )
         return result
 

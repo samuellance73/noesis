@@ -10,7 +10,6 @@ model, enforces token budgets, and handles fallback chains transparently.
 from __future__ import annotations
 
 import json
-import logging
 import time
 from enum import Enum
 from typing import Literal
@@ -24,8 +23,7 @@ from tenacity import (
     stop_after_attempt,
     wait_exponential,
 )
-
-logger = logging.getLogger("noesis.model_router")
+from utils.log_writer import emit
 
 
 # ── Tier enum ──────────────────────────────────────────────────────────────
@@ -104,13 +102,26 @@ class ModelRouter:
     def __init__(self, config: ModelRouterConfig, transport: "UpstreamService"):
         self.config = config
         self.transport = transport
-        self._llm_logger = logging.getLogger("noesis.llm")
 
     # ── Public API ────────────────────────────────────────────────────────
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
         tier_config = self.config.tiers[request.tier]
         messages = self._prepare_messages(request, tier_config)
+        
+        emit(
+            event="llm.request",
+            layer="llm",
+            level="debug",
+            data={
+                "tier": request.tier.value,
+                "model": tier_config.primary,
+                "messages": messages,
+                "system": request.system,
+                "component": request.component,
+            }
+        )
+        
         return await self._complete_with_fallback(request, messages, tier_config)
 
     def resolve_model(self, tier: ModelTier) -> str:
@@ -193,9 +204,15 @@ class ModelRouter:
             fallback_reason = str(last_exception) if fallback_used else None
 
             if fallback_used:
-                logger.warning(
-                    f"Falling back to {model} for tier={request.tier.value}. "
-                    f"Reason: {fallback_reason}"
+                emit(
+                    event="transport.fallback",
+                    layer="transport",
+                    level="warn",
+                    data={
+                        "model": model,
+                        "tier": request.tier.value,
+                        "reason": fallback_reason,
+                    }
                 )
 
             try:
@@ -245,7 +262,6 @@ class ModelRouter:
                 min=retry_config.wait_min_seconds,
                 max=retry_config.wait_max_seconds
             ),
-            before_sleep=before_sleep_log(logger, logging.WARNING),
             reraise=True,
         )
         async def _attempt():
@@ -298,22 +314,28 @@ class ModelRouter:
         component: str | None
     ) -> None:
         """Emit structured log entry for observability."""
-        log_entry = {
-            "tier": response.tier.value,
-            "model_requested": self.config.tiers[response.tier].primary,
-            "model_used": response.model_used,
-            "fallback_used": response.fallback_used,
-            "fallback_reason": response.fallback_reason,
-            "prompt_tokens": response.prompt_tokens,
-            "completion_tokens": response.completion_tokens,
-            "total_tokens": response.total_tokens,
-            "budget": tier_config.context_budget,
-            "budget_utilization": response.total_tokens / tier_config.context_budget,
-            "latency_ms": response.latency_ms,
-            "component": component or "unknown",
-            "status": "success",
-        }
-        self._llm_logger.info(json.dumps(log_entry))
+        emit(
+            event="llm.response",
+            layer="llm",
+            level="debug",
+            data={
+                "tier": response.tier.value,
+                "model_requested": self.config.tiers[response.tier].primary,
+                "model_used": response.model_used,
+                "fallback_used": response.fallback_used,
+                "fallback_reason": response.fallback_reason,
+                "usage": {
+                    "prompt": response.prompt_tokens,
+                    "completion": response.completion_tokens,
+                    "total": response.total_tokens,
+                },
+                "budget": tier_config.context_budget,
+                "budget_utilization": response.total_tokens / tier_config.context_budget,
+                "elapsed_ms": response.latency_ms,
+                "component": component or "unknown",
+                "status": "success",
+            }
+        )
 
 
 # ── Prompt Budget Guard ─────────────────────────────────────────────────────
@@ -332,15 +354,22 @@ def assert_fits_budget(
     if token_estimate > budget:
         raise BudgetExceededError(tier, token_estimate, budget)
     if token_estimate > budget * 0.85:
-        logger.warning(
-            f"{label} is at {token_estimate}/{budget} tokens "
-            f"({token_estimate/budget:.0%} of {tier} budget)"
+        emit(
+            event="transport.budget_pressure",
+            layer="transport",
+            level="warn",
+            data={
+                "label": label,
+                "token_estimate": token_estimate,
+                "budget": budget,
+                "tier": tier.value,
+            }
         )
 
 
 # ── Config Loading ─────────────────────────────────────────────────────────
 
-def load_config(config_path: str = "main/config/model_router.yaml") -> ModelRouterConfig:
+def load_config(config_path: str = "config/model_router.yaml") -> ModelRouterConfig:
     """Load ModelRouter configuration from YAML file."""
     with open(config_path, "r") as f:
         data = yaml.safe_load(f)

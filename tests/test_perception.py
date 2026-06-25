@@ -38,11 +38,9 @@ from perception.schemas import (
     SourceType,
 )
 from perception.stages.authority import AuthorityScorer
-from perception.stages.classifier import Classifier
 from perception.stages.dedup import Deduplicator
 from perception.stages.intake import IntakeBuffer
 from perception.stages.router import Router
-from perception.stages.synthesizer import Synthesizer
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -233,57 +231,8 @@ class TestDeduplicator:
         assert result[0].frequency == 5
 
 
-# ── Stage 3: Classifier ───────────────────────────────────────────────────────
-
-class TestClassifier:
-
-    def setup_method(self):
-        self.c = Classifier()
-
-    def _classify(self, text: str, stype: SourceType = SourceType.USER) -> PerceptionType:
-        ds = _deduped(text=text, stype=stype)
-        return self.c.classify(ds)
-
-    def test_noise_too_short(self):
-        assert self._classify("ok") == PerceptionType.NOISE
-
-    def test_noise_pure_emoji(self):
-        assert self._classify("👍👍👍") == PerceptionType.NOISE
-
-    def test_noise_bot_command(self):
-        assert self._classify("!status running now") == PerceptionType.NOISE
-
-    def test_correction_actually(self):
-        result = self._classify("actually that answer you gave was completely wrong")
-        assert result == PerceptionType.CORRECTION
-
-    def test_correction_you_said(self):
-        result = self._classify("you said the deployment was done but it clearly was not")
-        assert result == PerceptionType.CORRECTION
-
-    def test_directive_create(self):
-        result = self._classify("create a new GitHub repository for the project")
-        assert result == PerceptionType.DIRECTIVE
-
-    def test_directive_please_do(self):
-        result = self._classify("can you update the configuration file for us")
-        assert result == PerceptionType.DIRECTIVE
-
-    def test_query_question_mark(self):
-        result = self._classify("what is the current deployment status?")
-        assert result == PerceptionType.QUERY
-
-    def test_query_wh_word(self):
-        result = self._classify("what happened to the last deployment cycle")
-        assert result == PerceptionType.QUERY
-
-    def test_information_declarative(self):
-        result = self._classify("the deployment finished at 14:30 UTC without issues")
-        assert result == PerceptionType.INFORMATION
-
-    def test_feedback_good_job(self):
-        result = self._classify("good job on the last release that was great work")
-        assert result == PerceptionType.FEEDBACK
+# ── Stage 3: Classifier (REMOVED) ───────────────────────────────────────────────
+# Classifier stage has been removed - signal interpretation is now handled by LLM bundle processing
 
 
 # ── Stage 4: AuthorityScorer ──────────────────────────────────────────────────
@@ -353,209 +302,86 @@ class TestAuthorityScorer:
         assert isinstance(result, ScoredSignal)
         assert result.perception_type == PerceptionType.DIRECTIVE
 
-    def test_raises_without_type(self):
+    def test_works_without_type(self):
+        """AuthorityScorer now works without perception_type (optional field)."""
         ts = datetime.now(timezone.utc)
         sig = RawSignal(source=_source(SourceType.USER), text="hello world test text", timestamp=ts)
         ds = DeduplicatedSignal(
             representative=sig, frequency=1, sources=[_source()], raw_signals=[sig],
             perception_type=None,
         )
-        with pytest.raises(ValueError, match="perception_type"):
-            self.scorer.score(ds)
+        result = self.scorer.score(ds)
+        assert isinstance(result, ScoredSignal)
+        assert result.perception_type is None
 
 
-# ── Stage 5: Synthesizer ──────────────────────────────────────────────────────
-
-class TestSynthesizer:
-
-    def _make_synthesizer(self, llm_content: str | None = None) -> Synthesizer:
-        """Build a Synthesizer with a mocked ModelRouter that returns fixed content."""
-        from core.model_router import ModelResponse, ModelTier
-        router = MagicMock()
-        mock_resp = ModelResponse(
-            content=llm_content or "[]",
-            model_used="test-model",
-            tier=ModelTier.NANO,
-            prompt_tokens=10,
-            completion_tokens=5,
-            total_tokens=15,
-            latency_ms=1.0,
-        )
-        router.complete = AsyncMock(return_value=mock_resp)
-        router.resolve_model = MagicMock(return_value="test-model")
-        return Synthesizer(router=router, timeout=5.0, max_tokens=800)
-
-    @pytest.mark.asyncio
-    async def test_single_signal_skips_llm(self):
-        from core.model_router import ModelResponse, ModelTier
-        router = MagicMock()
-        router.complete = AsyncMock()
-        router.resolve_model = MagicMock(return_value="test-model")
-        synth = Synthesizer(router=router, timeout=5.0, max_tokens=800)
-
-        signals = [_scored()]
-        events, _ = await synth.synthesize(signals)
-
-        assert len(events) == 1
-        router.complete.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_trivial_event_preserves_type(self):
-        synth = self._make_synthesizer()
-        s = _scored(ptype=PerceptionType.DIRECTIVE, authority=0.9)
-        events, _ = await synth.synthesize([s])
-        assert events[0].type == PerceptionType.DIRECTIVE
-
-    @pytest.mark.asyncio
-    async def test_llm_response_parsed_correctly(self):
-        good_json = """
-        [
-          {
-            "summary": "User wants deployment status",
-            "type": "query",
-            "urgency": 0.6,
-            "authority_score": 0.5,
-            "requires_immediate_response": true,
-            "affects_objectives": false,
-            "frequency": 2,
-            "source_ids": [],
-            "response_context": "Check deployment status"
-          }
-        ]
-        """
-        synth = self._make_synthesizer(good_json)
-        signals = [_scored(), _scored(text="second signal text here")]
-        events, _ = await synth.synthesize(signals)
-        assert len(events) == 1
-        assert events[0].type == PerceptionType.QUERY
-        assert events[0].requires_immediate_response is True
-
-    @pytest.mark.asyncio
-    async def test_timeout_falls_back_to_trivial(self):
-        from core.model_router import ModelTier
-        router = MagicMock()
-
-        async def slow(*args, **kwargs):
-            await asyncio.sleep(10)
-
-        router.complete = slow
-        router.resolve_model = MagicMock(return_value="test-model")
-        synth = Synthesizer(router=router, timeout=0.1, max_tokens=800)
-
-        signals = [_scored(), _scored(text="another different signal here")]
-        events, _ = await synth.synthesize(signals)
-        # Fallback: one event per signal
-        assert len(events) == 2
-
-    @pytest.mark.asyncio
-    async def test_invalid_json_falls_back_to_trivial(self):
-        synth = self._make_synthesizer("this is not json at all!!!")
-        signals = [_scored(), _scored(text="another sample text signal")]
-        events, _ = await synth.synthesize(signals)
-        assert len(events) == 2  # fallback: one per signal
-
-    @pytest.mark.asyncio
-    async def test_empty_signals_returns_empty(self):
-        synth = self._make_synthesizer()
-        events, latency = await synth.synthesize([])
-        assert events == []
-        assert latency == 0.0
+# ── Stage 4: Synthesizer (REMOVED) ───────────────────────────────────────────────
+# Synthesizer stage has been removed - signal interpretation is now handled by LLM bundle processing
+# in PerceptionLayer._process_bundle()
 
 
-# ── Stage 6: Router ───────────────────────────────────────────────────────────
+# ── Stage 5: Router ───────────────────────────────────────────────────────────
 
 class TestRouter:
 
     def _make_router(self):
-        pool = MagicMock()
-        pool.enqueue = AsyncMock()
         wm = MagicMock()
-        wm.absorb = AsyncMock()
-        wm.flag_for_interrupt = AsyncMock()
-        return Router(reactive_pool=pool, world_model=wm), pool, wm
+        wm.add_perception_context = AsyncMock()
+        return Router(world_model=wm), wm
 
     @pytest.mark.asyncio
-    async def test_noise_is_dropped(self):
-        router, pool, wm = self._make_router()
-        ev = _event(ptype=PerceptionType.NOISE)
-        await router.route([ev])
-        pool.enqueue.assert_not_called()
-        wm.absorb.assert_not_called()
+    async def test_drop_action_ignores_signal(self):
+        router, wm = self._make_router()
+        signal = _scored()
+        decision = {"index": 0, "action": "drop", "priority": "low", "summary": "noise", "reason": "test"}
+        await router.route([signal], [decision])
+        wm.add_perception_context.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_directive_goes_to_reactive_and_world(self):
-        router, pool, wm = self._make_router()
-        ev = _event(ptype=PerceptionType.DIRECTIVE, authority=0.5)
-        await router.route([ev])
-        pool.enqueue.assert_called_once()
-        wm.absorb.assert_called_once()
-        wm.flag_for_interrupt.assert_not_called()
+    async def test_queue_action_adds_to_world_model(self):
+        router, wm = self._make_router()
+        signal = _scored()
+        decision = {"index": 0, "action": "queue", "priority": "medium", "summary": "test summary", "reason": "test"}
+        await router.route([signal], [decision])
+        wm.add_perception_context.assert_called_once()
+        call_args = wm.add_perception_context.call_args[0][0]
+        assert call_args["summary"] == "test summary"
+        assert call_args["priority"] == "medium"
 
     @pytest.mark.asyncio
-    async def test_directive_high_authority_interrupts(self):
-        router, pool, wm = self._make_router()
-        ev = _event(ptype=PerceptionType.DIRECTIVE, authority=0.9)
-        await router.route([ev])
-        pool.enqueue.assert_called_once()
-        wm.absorb.assert_called_once()
-        wm.flag_for_interrupt.assert_called_once()
+    async def test_interrupt_action_submits_trigger(self):
+        router, wm = self._make_router()
+        signal = _scored()
+        decision = {"index": 0, "action": "interrupt", "priority": "high", "summary": "urgent", "reason": "test"}
+        await router.route([signal], [decision])
+        wm.add_perception_context.assert_not_called()
+        # trigger_store.human_ready.set() should be called
+        from triggers.store import trigger_store
+        # The trigger should be submitted
+        assert trigger_store.human_ready.is_set()
+        # Reset for other tests
+        trigger_store.human_ready.clear()
 
     @pytest.mark.asyncio
-    async def test_query_reactive_only(self):
-        router, pool, wm = self._make_router()
-        ev = _event(ptype=PerceptionType.QUERY)
-        await router.route([ev])
-        pool.enqueue.assert_called_once()
-        wm.absorb.assert_not_called()
-        wm.flag_for_interrupt.assert_not_called()
+    async def test_unknown_action_defaults_to_queue(self):
+        router, wm = self._make_router()
+        signal = _scored()
+        decision = {"index": 0, "action": "unknown", "priority": "medium", "summary": "test", "reason": "test"}
+        await router.route([signal], [decision])
+        wm.add_perception_context.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_information_world_only(self):
-        router, pool, wm = self._make_router()
-        ev = _event(ptype=PerceptionType.INFORMATION)
-        await router.route([ev])
-        pool.enqueue.assert_not_called()
-        wm.absorb.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_correction_low_authority_no_interrupt(self):
-        router, pool, wm = self._make_router()
-        ev = _event(ptype=PerceptionType.CORRECTION, authority=0.5)
-        await router.route([ev])
-        pool.enqueue.assert_not_called()
-        wm.absorb.assert_called_once()
-        wm.flag_for_interrupt.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_correction_high_authority_interrupts(self):
-        router, pool, wm = self._make_router()
-        ev = _event(ptype=PerceptionType.CORRECTION, authority=0.8)
-        await router.route([ev])
-        wm.absorb.assert_called_once()
-        wm.flag_for_interrupt.assert_called_once()
-        pool.enqueue.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_feedback_world_only(self):
-        router, pool, wm = self._make_router()
-        ev = _event(ptype=PerceptionType.FEEDBACK)
-        await router.route([ev])
-        pool.enqueue.assert_not_called()
-        wm.absorb.assert_called_once()
-        wm.flag_for_interrupt.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_multiple_events_routed_independently(self):
-        router, pool, wm = self._make_router()
-        events = [
-            _event(ptype=PerceptionType.DIRECTIVE, authority=0.5),
-            _event(ptype=PerceptionType.NOISE),
-            _event(ptype=PerceptionType.QUERY),
-            _event(ptype=PerceptionType.INFORMATION),
+    async def test_multiple_signals_routed_independently(self):
+        router, wm = self._make_router()
+        signals = [_scored(), _scored(text="second"), _scored(text="third")]
+        decisions = [
+            {"index": 0, "action": "interrupt", "priority": "high", "summary": "first", "reason": "test"},
+            {"index": 1, "action": "queue", "priority": "medium", "summary": "second", "reason": "test"},
+            {"index": 2, "action": "drop", "priority": "low", "summary": "third", "reason": "test"},
         ]
-        await router.route(events)
-        assert pool.enqueue.call_count == 2   # directive + query
-        assert wm.absorb.call_count == 2      # directive + information
+        await router.route(signals, decisions)
+        # Only queue action should call add_perception_context
+        assert wm.add_perception_context.call_count == 1
 
 
 # ── WorldModel facade ──────────────────────────────────────────────────────────
@@ -594,3 +420,13 @@ class TestPerceptionWorldModel:
             await wm.absorb(_event())
         drained = wm.drain_perceptions()
         assert len(drained) == 5
+
+    @pytest.mark.asyncio
+    async def test_add_and_drain_contexts(self):
+        wm = PerceptionWorldModel()
+        await wm.add_perception_context({"text": "test", "source": "discord", "summary": "test summary"})
+        contexts = wm.drain_contexts()
+        assert len(contexts) == 1
+        assert contexts[0]["summary"] == "test summary"
+        # Second drain should be empty
+        assert wm.drain_contexts() == []

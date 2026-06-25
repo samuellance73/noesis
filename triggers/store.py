@@ -20,16 +20,14 @@ Design notes
 """
 
 import asyncio
-import logging
 from datetime import datetime, timezone
 from typing import Literal, Optional
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
+from utils.log_writer import emit
 
-logger = logging.getLogger("noesis.trigger_store")
-
-TriggerSource = Literal["human", "executor", "cron", "discord", "webhook", "agent"]
+TriggerSource = Literal["human", "executor", "cron", "discord", "webhook", "agent", "perception"]
 TriggerStatus = Literal["pending", "processing", "done", "failed"]
 
 
@@ -80,15 +78,20 @@ class TriggerStore:
                     t.description += f"\n[Follow-up]: {description}"
                     # Update metadata (e.g. latest message id)
                     t.metadata.update(metadata)
-                    logger.info("TriggerStore: bunched with existing trigger id=%s", t.id)
+                    emit("daemon.trigger_bunched", "daemon", {"trigger_id": str(t.id)})
                     return t
             metadata["bunch_key"] = bunch_key
 
         t = Trigger(source=source, description=description, model=model, metadata=metadata)
         self._triggers[t.id] = t
-        logger.info(
-            "TriggerStore: submitted trigger id=%s source=%s description=%r",
-            t.id, t.source, t.description[:80],
+        emit(
+            event="daemon.trigger_added",
+            layer="daemon",
+            data={
+                "trigger_id": str(t.id),
+                "source": t.source,
+                "description": t.description[:80],
+            }
         )
         if source in ("human", "executor"):
             self.human_ready.set()  # wake daemon immediately for operator triggers
@@ -106,7 +109,7 @@ class TriggerStore:
         for t in pending:
             t.status = "processing"
         if pending:
-            logger.info("TriggerStore: drained %d pending trigger(s).", len(pending))
+            emit("daemon.triggers_drained", "daemon", {"count": len(pending)})
         return pending
 
     def get(self, trigger_id: UUID) -> Optional[Trigger]:
@@ -120,13 +123,13 @@ class TriggerStore:
     def mark_done(self, trigger_id: UUID) -> None:
         if t := self._triggers.get(trigger_id):
             t.status = "done"
-            logger.info("TriggerStore: trigger %s → done", trigger_id)
+            emit("daemon.trigger_done", "daemon", {"trigger_id": str(trigger_id)})
 
     def mark_failed(self, trigger_id: UUID, error: str = "") -> None:
         if t := self._triggers.get(trigger_id):
             t.status = "failed"
             t.error = error
-            logger.warning("TriggerStore: trigger %s → failed: %s", trigger_id, error)
+            emit("daemon.trigger_failed", "daemon", {"trigger_id": str(trigger_id), "error": error}, level="warn")
 
 
 # ── Global singleton ───────────────────────────────────────────────────────────

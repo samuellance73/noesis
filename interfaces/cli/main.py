@@ -27,6 +27,8 @@ from integrations.llm.service import UpstreamService
 from integrations.llm.client import get_client
 from core.model_router import ModelRouter, load_config
 from agents.goal_manager import GoalManager
+from utils.dashboard import LiveDashboard, SimpleDashboard
+from utils.log_writer import emit
 
 console = Console()
 
@@ -109,6 +111,43 @@ def _render_event(event: dict) -> None:
             console.print(Panel(event["summary"], title="Progress so far", border_style="yellow"))
 
 
+def _update_dashboard_full(dash: LiveDashboard, event: dict) -> None:
+    """Update the full dashboard based on event type."""
+    ev = event.get("event")
+    
+    if ev == "goal_set":
+        dash.update_goal(event.get("goal", ""))
+    elif ev == "spawning_tasks":
+        tasks = [{"label": t[:40], "status": "pending"} for t in event.get("tasks", [])]
+        dash.update_plan(tasks)
+    elif ev == "cycle_start":
+        dash.add_log_event("strategic", "cycle_start", {"cycle": event.get("cycle")})
+    elif ev == "manager_thought":
+        dash.add_log_event("strategic", "manager_thought", {"thought": event.get("thought", "")[:50]})
+    elif ev == "thought":
+        dash.add_log_event("tactical", "thought", {"thought": event.get("thought", "")[:50]})
+    elif ev == "tool_start":
+        dash.add_log_event("tactical", "tool_call", {"tool": event.get("tool_name"), "input": str(event.get("tool_input", ""))[:30]})
+    elif ev == "tool_observation":
+        dash.add_log_event("tactical", "tool_result", {"result": event.get("observation", "")[:50]})
+    elif ev == "final_answer":
+        dash.add_log_event("tactical", "final_answer", {"answer": event.get("answer", "")[:50]})
+
+
+def _update_dashboard_simple(dash: SimpleDashboard, event: dict) -> None:
+    """Update the simple dashboard based on event type."""
+    ev = event.get("event")
+    
+    if ev == "thought":
+        dash.add_log_event("tactical", "thought", {"thought": event.get("thought", "")[:50]})
+    elif ev == "tool_start":
+        dash.add_log_event("tactical", "tool_call", {"tool": event.get("tool_name"), "input": str(event.get("tool_input", ""))[:30]})
+    elif ev == "tool_observation":
+        dash.add_log_event("tactical", "tool_result", {"result": event.get("observation", "")[:50]})
+    elif ev == "final_answer":
+        dash.add_log_event("tactical", "final_answer", {"answer": event.get("answer", "")[:50]})
+
+
 async def _input_listener(manager: GoalManager) -> None:
     """
     Reads lines from stdin without blocking the event loop.
@@ -131,7 +170,7 @@ async def _input_listener(manager: GoalManager) -> None:
 
 
 async def run_terminal_interface() -> None:
-    router_config = load_config("main/config/model_router.yaml")
+    router_config = load_config("config/model_router.yaml")
 
     async with get_client(timeout=60.0) as client:
         transport = UpstreamService(client)
@@ -166,8 +205,23 @@ async def run_terminal_interface() -> None:
 
             # ── Run manager loop + input listener concurrently ─────────
             async def stream_events():
-                async for event in manager.run_stream(goal):
-                    _render_event(event)
+                # Check if this is a quick command (! prefix)
+                is_quick = goal.startswith("!")
+                
+                if is_quick:
+                    # Use simple dashboard for quick commands
+                    with SimpleDashboard() as dash:
+                        async for event in manager.run_stream(goal):
+                            _render_event(event)
+                            _update_dashboard_simple(dash, event)
+                else:
+                    # Use full dashboard for autonomous runs
+                    import uuid
+                    run_id = str(uuid.uuid4())[:8]
+                    with LiveDashboard(goal=goal, run_id=run_id) as dash:
+                        async for event in manager.run_stream(goal):
+                            _render_event(event)
+                            _update_dashboard_full(dash, event)
 
             try:
                 await asyncio.gather(

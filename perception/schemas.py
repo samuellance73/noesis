@@ -92,14 +92,14 @@ class PerceptionType(str, Enum):
 
 class ScoredSignal(BaseModel):
     """
-    A deduplicated signal after classification and authority scoring.
-    This is the input type for the Synthesizer stage.
+    A deduplicated signal after authority scoring.
+    This is the input type for the LLM bundle processing.
     """
     id: UUID = Field(default_factory=uuid4)
     representative: RawSignal
     frequency: int
     sources: list[RawSignalSource]
-    perception_type: PerceptionType
+    perception_type: PerceptionType | None = None
     authority_score: float
 
 
@@ -147,12 +147,17 @@ class PerceptionWorldModel:
     def __init__(self) -> None:
         self.pending_perceptions: asyncio.Queue[PerceptionEvent] = asyncio.Queue()
         self.interrupt_flags: list[PerceptionEvent] = []
+        self.perception_contexts: list[dict] = []
 
     async def absorb(self, event: PerceptionEvent) -> None:
         await self.pending_perceptions.put(event)
 
     async def flag_for_interrupt(self, event: PerceptionEvent) -> None:
         self.interrupt_flags.append(event)
+
+    async def add_perception_context(self, context: dict) -> None:
+        """Add a perception context dict for the next GoalManager cycle."""
+        self.perception_contexts.append(context)
 
     def drain_perceptions(self) -> list[PerceptionEvent]:
         events: list[PerceptionEvent] = []
@@ -164,3 +169,8 @@ class PerceptionWorldModel:
         flags = list(self.interrupt_flags)
         self.interrupt_flags.clear()
         return flags
+
+    def drain_contexts(self) -> list[dict]:
+        contexts = list(self.perception_contexts)
+        self.perception_contexts.clear()
+        return contexts

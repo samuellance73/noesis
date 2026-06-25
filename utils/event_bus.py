@@ -24,9 +24,7 @@ Usage
 """
 
 import asyncio
-import logging
-
-logger = logging.getLogger("noesis.event_bus")
+from utils.log_writer import emit
 
 
 class EventBus:
@@ -50,7 +48,7 @@ class EventBus:
         """
         q: asyncio.Queue = asyncio.Queue(maxsize=self._QUEUE_MAXSIZE)
         self._subscribers.append(q)
-        logger.debug("EventBus: subscriber added (%d total)", len(self._subscribers))
+        emit("system.subscriber_added", "system", {"total": len(self._subscribers)}, level="debug")
         return q
 
     def unsubscribe(self, q: asyncio.Queue) -> None:
@@ -59,7 +57,7 @@ class EventBus:
         """
         try:
             self._subscribers.remove(q)
-            logger.debug("EventBus: subscriber removed (%d remaining)", len(self._subscribers))
+            emit("system.subscriber_removed", "system", {"remaining": len(self._subscribers)}, level="debug")
         except ValueError:
             pass  # already removed (double-close guard)
 

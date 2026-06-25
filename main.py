@@ -1,4 +1,3 @@
-import logging
 import os
 
 from dotenv import load_dotenv
@@ -13,13 +12,7 @@ load_dotenv(override=True)
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from utils.logging_setup import setup_global_logging
 from app.lifespan import lifespan
-
-_console_level = (
-    logging.INFO if os.getenv("LOG_LEVEL", "").upper() == "INFO" else logging.WARNING
-)
-setup_global_logging(console_level=_console_level)
 
 app = FastAPI(lifespan=lifespan)
 

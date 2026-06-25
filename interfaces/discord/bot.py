@@ -24,17 +24,15 @@ Lifecycle
 """
 
 import asyncio
-import logging
 import os
 from typing import Optional
 
 import discord
 
-# integrations.llm imports removed as the bot only submits triggers to the store
 from triggers.store import trigger_store
 from utils.event_bus import event_bus
-
-logger = logging.getLogger("noesis.discord")
+from perception.schemas import RawSignal, RawSignalSource, SourceType, Priority
+from utils.log_writer import emit
 
 # ── Config ────────────────────────────────────────────────────────────────────
 # Username (not display name) that is treated as the human operator.
@@ -218,7 +216,7 @@ bot = discord.Client()
 
 @bot.event
 async def on_ready():
-    logger.info("Discord selfbot logged in as %s (id=%s)", bot.user, bot.user.id)
+    emit("discord.ready", "system", {"user": str(bot.user), "id": bot.user.id})
     print(f"✅ Discord selfbot ready — logged in as {bot.user} ({bot.user.id})")
     print(f"   Human operator : {HUMAN_USERNAME!r}")
     print(f"   Default model  : {DEFAULT_MODEL}")
@@ -315,41 +313,47 @@ async def _handle_human_message(message: discord.Message) -> None:
 
 # ── Neutral-user handling ─────────────────────────────────────────────────────
 
-def _build_neutral_trigger_description(message: discord.Message, context: str) -> str:
-    """Build the prompt description for neutral user triggers."""
-    context_section = (
-        f"Recent conversation context (last {CONTEXT_MESSAGES_LIMIT} messages):\n{context}\n\n"
-        if context else ""
-    )
-    return (
-        f"Ultimate Goal: Act as a highly capable AI assistant. If the user asks you to perform a task (like creating a GitHub repo, writing code, etc.), you MUST execute it using your available tools (like python_execute) FIRST before replying. Do not hallucinate actions. Once you have actually completed the task, reply to the user to inform them of the results.\n\n"
-        f"{context_section}"
-        f"In Discord channel {message.channel.id}, user '{message.author.display_name}' (@{message.author.name}) said:\n"
-        f"{message.content}\n\n"
-        f"Please fulfill their request if possible, then reply to them in channel {message.channel.id} using the send_discord_message tool."
-    )
-
-
 async def _handle_neutral_message(message: discord.Message) -> None:
     """
     Messages from anyone who is NOT the human operator (psilko).
-    Includes recent channel history so the agent understands the conversation.
-    Submit to the daemon's trigger store (picked up on the next 60-second poll).
+    Flows through the PerceptionLayer:
+      ingest → deduplicate → classify → authority score → synthesize → route
+    Queries/directives trigger an immediate AgentExecutor response via the
+    ReactivePool.  Information signals update the WorldModel for the next
+    GoalManager cycle.
     """
     context = await _fetch_context(message.channel, before_message=message)
-    description = _build_neutral_trigger_description(message, context)
-    bunch_key = f"discord_{message.channel.id}_{message.author.id}"
-    trigger_store.submit(
-        source="discord",
-        description=description,
-        model=DEFAULT_MODEL,
-        metadata={"channel_id": message.channel.id, "message_id": message.id},
-        bunch_key=bunch_key,
+    full_text = (
+        f"User '{message.author.display_name}' (@{message.author.name}) "
+        f"in channel {message.channel.id} said:\n{message.content}"
     )
-    logger.info(
-        "[Discord] Queued daemon trigger for neutral message from %s in channel %d.",
-        message.author.name, message.channel.id,
+    if context:
+        full_text = (
+            f"Recent conversation context:\n{context}\n\n{full_text}"
+        )
+
+    signal = RawSignal(
+        source=RawSignalSource(
+            type=SourceType.USER,
+            identifier=message.author.name,
+            display_name=message.author.display_name,
+        ),
+        text=full_text,
+        priority=Priority.NORMAL,
+        channel_id=str(message.channel.id),
+        metadata={"message_id": message.id, "channel_id": message.channel.id},
     )
+
+    # Lazy-import to avoid circular dependencies at module load time.
+    from main import app as _app  # noqa: PLC0415
+    try:
+        await _app.state.perception.ingest(signal)
+    except AttributeError:
+        # Perception layer not yet started (e.g. during tests) — fall back.
+        emit("discord.warning", "system", {"msg": f"PerceptionLayer not available; dropping neutral message from {message.author.name}."}, level="warn")
+        return
+
+    emit("discord.ingested", "system", {"author": message.author.name, "channel_id": message.channel.id})
     await message.add_reaction("⏳")
 
 
@@ -357,20 +361,16 @@ async def _listen_to_event_bus() -> None:
     """
     Listen to the central event bus for daemon events and route them to Discord.
 
-    Operator triggers (human + executor sources) are piped back to the channel
-    so the operator sees what the agent is doing.
-
-    Neutral / discord-sourced triggers are intentionally silent here — the agent
-    already replies to those users via the send_discord_message tool directly.
-    Leaking the internal state to a random user would expose admin-only info.
+    Operator triggers (human + executor sources) and discord-sourced triggers
+    are piped back to the channel so users can see what the agent is doing.
     """
     q = event_bus.subscribe()
     try:
         while True:
             event = await q.get()
 
-            # Forward events for both operator-sourced trigger types.
-            if event.get("trigger_source") not in ("human", "executor"):
+            # Forward events for operator and discord-sourced triggers.
+            if event.get("trigger_source") not in ("human", "executor", "discord"):
                 continue
 
             metadata = event.get("trigger_metadata", {})

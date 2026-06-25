@@ -18,12 +18,10 @@ non-high-priority signal is dropped to make room for the incoming one.
 from __future__ import annotations
 
 import asyncio
-import logging
 from collections import deque
 
 from perception.schemas import Priority, RawSignal
-
-logger = logging.getLogger("noesis.perception")
+from utils.log_writer import emit
 
 
 class IntakeBuffer:
@@ -61,23 +59,17 @@ class IntakeBuffer:
                 dropped = self._drop_oldest_normal()
                 if dropped is None:
                     # All buffered signals are HIGH — drop the new one instead
-                    logger.warning(
-                        "IntakeBuffer full of HIGH-priority signals; dropping incoming signal id=%s",
-                        signal.id,
-                    )
+                    emit("perception.warning", "perception", {"msg": f"IntakeBuffer full of HIGH-priority signals; dropping incoming signal id={signal.id}"}, level="warn")
                     return
-                logger.warning(
-                    "IntakeBuffer full; dropped oldest normal signal id=%s to fit id=%s",
-                    dropped.id, signal.id,
-                )
+                emit("perception.warning", "perception", {"msg": f"IntakeBuffer full; dropped oldest normal signal id={dropped.id} to fit id={signal.id}"}, level="warn")
 
             self._buffer.append(signal)
 
         if signal.priority == Priority.HIGH:
-            logger.debug("IntakeBuffer: HIGH-priority signal received — setting flush trigger.")
+            emit("perception.flush_trigger", "perception", {"reason": "high_priority"}, level="debug")
             self.flush_trigger.set()
         elif len(self._buffer) >= self.max_size:
-            logger.debug("IntakeBuffer: buffer full — setting flush trigger.")
+            emit("perception.flush_trigger", "perception", {"reason": "buffer_full"}, level="debug")
             self.flush_trigger.set()
 
     async def drain(self) -> list[RawSignal]:

@@ -33,7 +33,7 @@ async def run_live_tests():
     console.print("\n[bold purple]🔍 Testing Live API Models from model_router.yaml[/bold purple]\n")
     
     # 1. Load config
-    config = load_config("main/config/model_router.yaml")
+    config = load_config("config/model_router.yaml")
     
     # 2. Extract unique models from the config
     unique_models = set()
@@ -42,7 +42,7 @@ async def run_live_tests():
         for fb in tier_config.fallbacks:
             unique_models.add(fb)
             
-    console.print(f"Loaded config from [yellow]main/config/model_router.yaml[/yellow]")
+    console.print(f"Loaded config from [yellow]config/model_router.yaml[/yellow]")
     console.print(f"Found [bold]{len(unique_models)}[/bold] unique model strings configured across tiers:")
     for model in sorted(unique_models):
         console.print(f"  • [blue]{model}[/blue]")
@@ -54,7 +54,7 @@ async def run_live_tests():
         
         # We will test two things:
         # A. Direct connection to each unique model
-        # B. End-to-end routing via ModelRouter tiers
+        # B. End-to-end routing via ModelRouter tiersz
 
         # --- A. Direct Model Tests ---
         console.print("[bold cyan]=== Part A: Testing Direct Upstream Model Connections ===[/bold cyan]")

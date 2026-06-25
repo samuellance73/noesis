@@ -1,10 +1,8 @@
-import logging
 from pydantic import BaseModel, Field
 
 from core.model_router import ModelRouter, ModelRequest, ModelTier
 from utils.json_parser import parse_llm_json
-
-logger = logging.getLogger("noesis.critic")
+from utils.log_writer import emit
 
 
 class CriticScore(BaseModel):
@@ -48,13 +46,21 @@ Example:
         content = raw_response.content
 
         if not content:
-            logger.error("Critic LLM returned empty content.")
+            emit("critic.error", "critic", {"msg": "Critic LLM returned empty content."}, level="error")
             return 0.5
 
         parsed = parse_llm_json(content, CriticScore)
         score = max(0.0, min(1.0, parsed.score))
-        logger.info("Critic score for task %r: %.2f (Reason: %s)", task_goal, score, parsed.reason)
+        emit(
+            event="critic.score",
+            layer="critic",
+            data={
+                "task_goal": task_goal,
+                "score": score,
+                "reason": parsed.reason,
+            }
+        )
         return score
     except Exception as e:
-        logger.error("Critic evaluation failed for task %r: %s", task_goal, e)
+        emit("critic.error", "critic", {"msg": f"Critic evaluation failed for task {task_goal!r}: {e}"}, level="error")
         return 0.5  # default neutral score on failure

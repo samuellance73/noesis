@@ -41,7 +41,7 @@ from integrations.llm.schemas import ChatCompletionResponse, Usage
 
 def _make_router(transport=None) -> tuple[ModelRouter, MagicMock]:
     """Return (router, transport_mock) using the real YAML config."""
-    config = load_config("main/config/model_router.yaml")
+    config = load_config("config/model_router.yaml")
     if transport is None:
         transport = MagicMock()
     return ModelRouter(config, transport), transport
@@ -60,14 +60,14 @@ class TestConfigLoading:
     """Test YAML configuration loading and validation."""
 
     def test_load_config_from_yaml(self):
-        config = load_config("main/config/model_router.yaml")
+        config = load_config("config/model_router.yaml")
         assert isinstance(config, ModelRouterConfig)
         assert ModelTier.NANO     in config.tiers
         assert ModelTier.STANDARD in config.tiers
         assert ModelTier.STRONG   in config.tiers
 
     def test_nano_tier_config(self):
-        config = load_config("main/config/model_router.yaml")
+        config = load_config("config/model_router.yaml")
         nano = config.tiers[ModelTier.NANO]
         assert isinstance(nano.primary, str)
         assert isinstance(nano.fallbacks, list)
@@ -77,7 +77,7 @@ class TestConfigLoading:
         assert nano.timeout_seconds    == 10.0
 
     def test_standard_tier_config(self):
-        config = load_config("main/config/model_router.yaml")
+        config = load_config("config/model_router.yaml")
         std = config.tiers[ModelTier.STANDARD]
         assert std.context_budget      == 8000
         assert std.max_response_tokens == 2000
@@ -85,7 +85,7 @@ class TestConfigLoading:
         assert std.timeout_seconds     == 30.0
 
     def test_strong_tier_config(self):
-        config = load_config("main/config/model_router.yaml")
+        config = load_config("config/model_router.yaml")
         strong = config.tiers[ModelTier.STRONG]
         assert strong.context_budget      == 32000
         assert strong.max_response_tokens == 4000
@@ -93,14 +93,14 @@ class TestConfigLoading:
         assert strong.timeout_seconds     == 60.0
 
     def test_retry_config(self):
-        config = load_config("main/config/model_router.yaml")
+        config = load_config("config/model_router.yaml")
         assert config.retry.max_attempts         == 3
         assert config.retry.wait_min_seconds     == 1
         assert config.retry.wait_max_seconds     == 30
         assert config.retry.retryable_status_codes == [429, 500, 502, 503, 504]
 
     def test_enforcement_config(self):
-        config = load_config("main/config/model_router.yaml")
+        config = load_config("config/model_router.yaml")
         assert config.enforcement.hard_limit         is True
         assert config.enforcement.truncation_strategy == "tail"
 
@@ -145,7 +145,7 @@ class TestBudgetEnforcement:
         assert exc_info.value.budget == 3000
 
     def test_budget_exceeded_soft_limit_truncation(self):
-        config = load_config("main/config/model_router.yaml")
+        config = load_config("config/model_router.yaml")
         config.enforcement.hard_limit = False
         router = ModelRouter(config, MagicMock())
 
@@ -174,7 +174,7 @@ class TestPerTierUpstreamModel:
     @pytest.mark.asyncio
     async def test_nano_tier_sends_correct_model_to_upstream(self):
         """transport.chat_completion receives the NANO primary model string."""
-        config = load_config("main/config/model_router.yaml")
+        config = load_config("config/model_router.yaml")
         expected_model = config.tiers[ModelTier.NANO].primary
 
         transport = AsyncMock()
@@ -197,7 +197,7 @@ class TestPerTierUpstreamModel:
     @pytest.mark.asyncio
     async def test_standard_tier_sends_correct_model_to_upstream(self):
         """transport.chat_completion receives the STANDARD primary model string."""
-        config = load_config("main/config/model_router.yaml")
+        config = load_config("config/model_router.yaml")
         expected_model = config.tiers[ModelTier.STANDARD].primary
 
         transport = AsyncMock()
@@ -219,7 +219,7 @@ class TestPerTierUpstreamModel:
     @pytest.mark.asyncio
     async def test_strong_tier_sends_correct_model_to_upstream(self):
         """transport.chat_completion receives the STRONG primary model string."""
-        config = load_config("main/config/model_router.yaml")
+        config = load_config("config/model_router.yaml")
         expected_model = config.tiers[ModelTier.STRONG].primary
 
         transport = AsyncMock()
@@ -241,7 +241,7 @@ class TestPerTierUpstreamModel:
     @pytest.mark.asyncio
     async def test_nano_fallback_model_used_when_primary_fails(self):
         """When NANO primary returns a rate-limit error, the first fallback model is used."""
-        config = load_config("main/config/model_router.yaml")
+        config = load_config("config/model_router.yaml")
         primary  = config.tiers[ModelTier.NANO].primary
         fallback = config.tiers[ModelTier.NANO].fallbacks[0]
 
@@ -282,7 +282,7 @@ class TestPerTierUpstreamModel:
     @pytest.mark.asyncio
     async def test_standard_fallback_model_used_when_primary_fails(self):
         """When STANDARD primary times out, the first fallback model is used."""
-        config = load_config("main/config/model_router.yaml")
+        config = load_config("config/model_router.yaml")
         primary  = config.tiers[ModelTier.STANDARD].primary
         fallback = config.tiers[ModelTier.STANDARD].fallbacks[0]
 
@@ -312,7 +312,7 @@ class TestPerTierUpstreamModel:
     @pytest.mark.asyncio
     async def test_strong_fallback_model_used_when_primary_fails(self):
         """When STRONG primary returns 503, the first fallback model is used."""
-        config = load_config("main/config/model_router.yaml")
+        config = load_config("config/model_router.yaml")
         primary  = config.tiers[ModelTier.STRONG].primary
         fallback = config.tiers[ModelTier.STRONG].fallbacks[0]
 
@@ -345,7 +345,7 @@ class TestPerTierUpstreamModel:
 
     def test_resolve_model_returns_primary_per_tier(self):
         """resolve_model returns the exact primary string from config for each tier."""
-        config = load_config("main/config/model_router.yaml")
+        config = load_config("config/model_router.yaml")
         router = ModelRouter(config, MagicMock())
 
         for tier in ModelTier:
@@ -353,7 +353,7 @@ class TestPerTierUpstreamModel:
 
     def test_budget_for_matches_config(self):
         """budget_for returns the correct context_budget for each tier."""
-        config = load_config("main/config/model_router.yaml")
+        config = load_config("config/model_router.yaml")
         router = ModelRouter(config, MagicMock())
 
         assert router.budget_for(ModelTier.NANO)     == 3000
@@ -368,7 +368,7 @@ class TestModelRouterCompletion:
     @pytest.mark.asyncio
     async def test_complete_success_response_fields(self):
         """Successful complete() populates all ModelResponse fields correctly."""
-        config = load_config("main/config/model_router.yaml")
+        config = load_config("config/model_router.yaml")
         transport = AsyncMock()
         transport.chat_completion = AsyncMock(
             return_value=ChatCompletionResponse(

@@ -33,15 +33,13 @@ Architecture
 """
 
 import asyncio
-import logging
 
 from triggers.store import Trigger, trigger_store
 from agents.executor import AgentExecutor
 from agents.goal_manager import GoalManager
 from core.model_router import ModelRouter
 from utils.event_bus import event_bus
-
-logger = logging.getLogger("noesis.daemon")
+from utils.log_writer import emit
 
 # GoalManager cycle cap for daemon-triggered human runs.
 _DAEMON_MAX_CYCLES = 5
@@ -59,9 +57,14 @@ async def _run_trigger(trigger: Trigger, router: ModelRouter) -> None:
     Route one trigger to the appropriate agent, stream events to the bus,
     and update the trigger status when done.
     """
-    logger.info(
-        "[Daemon] Starting trigger id=%s source=%s: %r",
-        trigger.id, trigger.source, trigger.description[:80],
+    emit(
+        event="daemon.trigger_dispatched",
+        layer="daemon",
+        data={
+            "trigger_id": str(trigger.id),
+            "source": trigger.source,
+            "description": trigger.description[:80],
+        }
     )
 
     # Announce to SSE clients that this trigger is now being processed
@@ -73,19 +76,19 @@ async def _run_trigger(trigger: Trigger, router: ModelRouter) -> None:
     })
 
     try:
-        if trigger.source in ("human", "discord"):
+        if trigger.source in ("human", "perception"):
             await _run_as_goal_manager(trigger, router)
         else:
             await _run_as_executor(trigger, router)
 
         trigger_store.mark_done(trigger.id)
-        logger.info("[Daemon] Trigger %s completed.", trigger.id)
+        emit("daemon.trigger_completed", "daemon", {"trigger_id": str(trigger.id)})
         await _update_discord_reaction(trigger, "✅")
 
     except Exception as e:
         error_msg = str(e)
         trigger_store.mark_failed(trigger.id, error=error_msg)
-        logger.error("[Daemon] Trigger %s failed: %s", trigger.id, error_msg, exc_info=True)
+        emit("daemon.trigger_failed", "daemon", {"trigger_id": str(trigger.id), "error": error_msg}, level="error")
         await event_bus.publish({
             "event":      "trigger_failed",
             "trigger_id": str(trigger.id),
@@ -131,7 +134,8 @@ async def _run_as_executor(trigger: Trigger, router: ModelRouter) -> None:
 
 async def _update_discord_reaction(trigger: Trigger, emoji: str) -> None:
     """Helper to update a message reaction on Discord when a trigger finishes."""
-    if trigger.source != "discord" or not trigger.metadata:
+    # Allow both direct discord executor tasks and perception manager tasks to clear reactions
+    if trigger.source not in ("discord", "perception") or not trigger.metadata:
         return
     channel_id = trigger.metadata.get("channel_id")
     message_id = trigger.metadata.get("message_id")
@@ -161,7 +165,7 @@ async def _update_discord_reaction(trigger: Trigger, emoji: str) -> None:
             except discord.HTTPException:
                 pass
     except Exception as e:
-        logger.warning("[Daemon] Failed to update Discord reaction: %s", e)
+        emit("daemon.warning", "daemon", {"msg": f"Failed to update Discord reaction: {e}"}, level="warn")
 
 
 
@@ -170,7 +174,7 @@ async def _process_batch(router: ModelRouter) -> None:
     pending = trigger_store.get_pending()
     if not pending:
         return
-    logger.info("[Daemon] Processing batch of %d trigger(s).", len(pending))
+    emit("daemon.batch_processing", "daemon", {"count": len(pending)})
     await asyncio.gather(*[_run_trigger(t, router) for t in pending])
 
 
@@ -190,9 +194,10 @@ async def start_daemon(
     To start this, call:
         asyncio.create_task(start_daemon(router=app.state.model_router))
     """
-    logger.info(
-        "[Daemon] Starting. Poll interval=%ds. Human triggers fire immediately.",
-        interval_seconds,
+    emit(
+        event="daemon.started",
+        layer="daemon",
+        data={"interval_seconds": interval_seconds}
     )
 
     # Small boot delay to let FastAPI fully initialize before first run
@@ -209,16 +214,16 @@ async def start_daemon(
                 )
                 # Clear the flag so the next human trigger can re-arm it
                 trigger_store.human_ready.clear()
-                logger.debug("[Daemon] Woke on human trigger fast-lane.")
+                emit("daemon.woke", "daemon", {"reason": "human_fast_lane"}, level="debug")
             except asyncio.TimeoutError:
-                logger.debug("[Daemon] Woke on poll interval.")
+                emit("daemon.woke", "daemon", {"reason": "poll_interval"}, level="debug")
 
             await _process_batch(router)
 
         except asyncio.CancelledError:
-            logger.info("[Daemon] Cancelled — shutting down cleanly.")
+            emit("daemon.cancelled", "daemon", {})
             raise  # re-raise so the task terminates properly
         except Exception as e:
             # Log but never crash the daemon — keep polling
-            logger.error("[Daemon] Unexpected error in main loop: %s", e, exc_info=True)
+            emit("daemon.error", "daemon", {"msg": f"Unexpected error in main loop: {e}"}, level="error")
             await asyncio.sleep(5)  # brief back-off before retry

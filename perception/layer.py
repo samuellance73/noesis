@@ -40,26 +40,22 @@ Perception events are logged to logs/perception.log via the
 from __future__ import annotations
 
 import asyncio
-import logging
-from typing import Any
 
 from perception.config import PerceptionConfig
 from perception.reactive_pool import ReactivePool
 from perception.schemas import (
     DeduplicatedSignal,
-    PerceptionEvent,
-    PerceptionType,
     PerceptionWorldModel,
     RawSignal,
+    ScoredSignal,
 )
 from perception.stages.authority import AuthorityScorer
-from perception.stages.classifier import Classifier
 from perception.stages.dedup import Deduplicator
 from perception.stages.intake import IntakeBuffer
 from perception.stages.router import Router
-from perception.stages.synthesizer import Synthesizer
-
-logger = logging.getLogger("noesis.perception")
+from core.model_router import ModelRouter, ModelRequest, ModelTier
+from utils.log_writer import emit
+from utils.json_parser import _clean_llm_json
 
 
 class PerceptionLayer:
@@ -71,9 +67,9 @@ class PerceptionLayer:
         config = PerceptionConfig()
         layer  = PerceptionLayer(
             config=config,
-            llm_service=app.state.upstream_service,
+            router=app.state.model_router,
             world_model=my_world_model,       # PerceptionWorldModel or custom
-            executor_factory=my_factory,      # optional ReactivePool executor
+            executor_factory=my_factory,      # callable(ResponseJob) -> Awaitable
         )
         await layer.start()     # launch intake loop + reactive pool
         ...
@@ -88,7 +84,7 @@ class PerceptionLayer:
     def __init__(
         self,
         config: PerceptionConfig,
-        llm_service: Any,                          # UpstreamService (duck-typed)
+        router: ModelRouter,
         world_model: PerceptionWorldModel | None = None,
         executor_factory=None,
     ) -> None:
@@ -105,21 +101,13 @@ class PerceptionLayer:
             similarity_threshold=config.similarity_threshold,
         )
 
-        # ── Stage 3: Classifier ────────────────────────────────────────────────
-        self._classifier = Classifier()
-
-        # ── Stage 4: Authority scorer ──────────────────────────────────────────
+        # ── Stage 3: Authority scorer ──────────────────────────────────────────
         self._authority = AuthorityScorer(
             operator_ids=config.operator_ids,
         )
 
-        # ── Stage 5: Synthesizer ───────────────────────────────────────────────
-        self._synthesizer = Synthesizer(
-            llm_service=llm_service,
-            model=config.synthesizer_model,
-            timeout=config.synthesizer_timeout_seconds,
-            max_tokens=config.synthesizer_max_tokens,
-        )
+        # ── ModelRouter for LLM bundle processing ───────────────────────────────
+        self._router_llm = router
 
         # ── ReactivePool ───────────────────────────────────────────────────────
         self._reactive_pool = ReactivePool(
@@ -131,10 +119,10 @@ class PerceptionLayer:
         # ── WorldModel facade ──────────────────────────────────────────────────
         self._world_model: PerceptionWorldModel = world_model or PerceptionWorldModel()
 
-        # ── Stage 6: Router ────────────────────────────────────────────────────
+        # ── Stage 5: Router ────────────────────────────────────────────────────
         self._router = Router(
-            reactive_pool=self._reactive_pool,
             world_model=self._world_model,
+            reactive_pool=self._reactive_pool,
         )
 
         self._loop_task: asyncio.Task | None = None
@@ -148,16 +136,22 @@ class PerceptionLayer:
         Thread-safe — may be called from any coroutine.
         """
         await self._intake.ingest(signal)
-        logger.debug(
-            "PerceptionLayer.ingest: signal id=%s  source=%s  priority=%s  text=%r",
-            signal.id, signal.source.identifier, signal.priority.value,
-            signal.text[:80],
+        emit(
+            event="perception.ingested",
+            layer="perception",
+            level="debug",
+            data={
+                "signal_id": signal.id,
+                "source": signal.source.identifier,
+                "priority": signal.priority.value,
+                "text": signal.text[:80],
+            }
         )
 
     async def start(self) -> None:
         """Launch the intake loop and reactive pool as background tasks."""
         if self._running:
-            logger.warning("PerceptionLayer.start() called while already running.")
+            emit("perception.warning", "perception", {"msg": "PerceptionLayer.start() called while already running."}, level="warn")
             return
 
         self._running = True
@@ -165,12 +159,14 @@ class PerceptionLayer:
         self._loop_task = asyncio.create_task(
             self._pipeline_loop(), name="perception-pipeline-loop"
         )
-        logger.info(
-            "PerceptionLayer started.  window=%.1fs  max_buf=%d  pool=%d  model=%s",
-            self.config.intake_window_seconds,
-            self.config.intake_max_buffer_size,
-            self.config.reactive_pool_size,
-            self.config.synthesizer_model,
+        emit(
+            event="perception.started",
+            layer="perception",
+            data={
+                "window": self.config.intake_window_seconds,
+                "max_buf": self.config.intake_max_buffer_size,
+                "pool": self.config.reactive_pool_size,
+            }
         )
 
     async def stop(self) -> None:
@@ -184,7 +180,7 @@ class PerceptionLayer:
                 pass
             self._loop_task = None
         await self._reactive_pool.stop()
-        logger.info("PerceptionLayer stopped.")
+        emit("perception.stopped", "perception", {})
 
     @property
     def world_model(self) -> PerceptionWorldModel:
@@ -198,14 +194,14 @@ class PerceptionLayer:
         Main async loop.  Drains the intake buffer and runs each batch through
         the full pipeline.  Runs forever until `stop()` cancels this task.
         """
-        logger.debug("PerceptionLayer: pipeline loop started.")
+        emit("perception.loop_started", "perception", {}, level="debug")
         while self._running:
             try:
                 batch = await self._intake.drain()
             except asyncio.CancelledError:
                 break
             except Exception as exc:
-                logger.error("PerceptionLayer: intake drain error: %s", exc, exc_info=True)
+                emit("perception.error", "perception", {"msg": f"intake drain error: {exc}"}, level="error")
                 await asyncio.sleep(1.0)
                 continue
 
@@ -214,21 +210,25 @@ class PerceptionLayer:
 
             await self._run_pipeline(batch)
 
-        logger.debug("PerceptionLayer: pipeline loop exited.")
+        emit("perception.loop_exited", "perception", {}, level="debug")
 
     async def _run_pipeline(self, batch: list[RawSignal]) -> None:
-        """Process one batch through all six stages with per-stage error isolation."""
+        """Process one batch through the 3-stage pipeline with per-stage error isolation."""
         raw_count = len(batch)
-        logger.info(
-            "PerceptionLayer: batch received  raw_count=%d  window=%.1fs",
-            raw_count, self.config.intake_window_seconds,
+        emit(
+            event="perception.batch_received",
+            layer="perception",
+            data={
+                "raw_count": raw_count,
+                "window": self.config.intake_window_seconds,
+            }
         )
 
         # ── Stage 2: Deduplication ─────────────────────────────────────────────
         try:
             deduped: list[DeduplicatedSignal] = self._dedup.deduplicate(batch)
         except Exception as exc:
-            logger.error("PerceptionLayer: Deduplicator crashed — passing signals through unmodified. error=%s", exc)
+            emit("perception.error", "perception", {"msg": f"Deduplicator crashed: {exc}"}, level="error")
             # Fallback: treat each raw signal as its own deduplicated signal
             deduped = [
                 DeduplicatedSignal(
@@ -240,96 +240,155 @@ class PerceptionLayer:
                 for s in batch
             ]
 
-        logger.info(
-            "PerceptionLayer: post-dedup count=%d (collapsed %d signals)",
-            len(deduped), raw_count - len(deduped),
+        emit(
+            event="perception.deduped",
+            layer="perception",
+            data={
+                "count": len(deduped),
+                "collapsed": raw_count - len(deduped),
+            }
         )
 
-        # ── Stage 3: Classification ────────────────────────────────────────────
-        classified: list[DeduplicatedSignal] = []
-        for ds in deduped:
-            try:
-                ds.perception_type = self._classifier.classify(ds)
-            except Exception as exc:
-                logger.error(
-                    "PerceptionLayer: Classifier crashed for signal id=%s — defaulting to INFORMATION. error=%s",
-                    ds.representative.id, exc,
-                )
-                ds.perception_type = PerceptionType.INFORMATION
-            classified.append(ds)
-
-        # Drop noise before scoring and synthesis
-        non_noise = [ds for ds in classified if ds.perception_type != PerceptionType.NOISE]
-        noise_count = len(classified) - len(non_noise)
-        if noise_count:
-            logger.info("PerceptionLayer: dropped %d NOISE signals.", noise_count)
-
-        if not non_noise:
-            logger.info("PerceptionLayer: entire batch classified as noise — skipping synthesis.")
-            return
-
-        # ── Stage 4: Authority scoring ─────────────────────────────────────────
+        # ── Stage 3: Authority scoring ─────────────────────────────────────────
         try:
-            scored = self._authority.score_batch(non_noise)
+            scored = self._authority.score_batch(deduped)
         except Exception as exc:
-            logger.error(
-                "PerceptionLayer: AuthorityScorer crashed — passing signals with default score 0.5. error=%s", exc
-            )
-            from perception.schemas import ScoredSignal
+            emit("perception.error", "perception", {"msg": f"AuthorityScorer crashed: {exc}"}, level="error")
             scored = [
                 ScoredSignal(
                     representative=ds.representative,
                     frequency=ds.frequency,
                     sources=ds.sources,
-                    perception_type=ds.perception_type or PerceptionType.INFORMATION,
+                    perception_type=None,
                     authority_score=0.5,
                 )
-                for ds in non_noise
+                for ds in deduped
             ]
 
-        # ── Stage 5: Synthesis (single LLM call) ───────────────────────────────
-        world_summary = self._get_world_summary()
+        # ── Stage 4: LLM bundle processing ───────────────────────────────────────
         try:
-            events, latency = await self._synthesizer.synthesize(scored, world_summary)
+            decisions = await self._process_bundle(scored)
         except Exception as exc:
-            logger.error(
-                "PerceptionLayer: Synthesizer crashed — falling back to trivial events. error=%s", exc
-            )
-            events = [self._synthesizer._trivial_event(s) for s in scored]
-            latency = 0.0
+            emit("perception.warning", "perception", {"msg": f"LLM bundle call failed: {exc}"}, level="warn")
+            decisions = [
+                {"index": i, "priority": "medium", "action": "queue",
+                 "summary": s.representative.text[:100], "reason": "fallback"}
+                for i, s in enumerate(scored)
+            ]
 
-        logger.info(
-            "PerceptionLayer: synthesizer produced %d event(s) in %.2fs",
-            len(events), latency,
+        emit(
+            event="perception.classified",
+            layer="perception",
+            data={"decision_count": len(decisions)}
         )
 
-        # Log each PerceptionEvent for perception.log
-        for ev in events:
-            logger.info(
-                "PerceptionLayer: event id=%s  type=%s  urgency=%.2f  authority=%.2f  "
-                "frequency=%d  immediate=%s  affects_objectives=%s  summary=%r",
-                ev.id, ev.type.value, ev.urgency, ev.authority_score,
-                ev.frequency, ev.requires_immediate_response, ev.affects_objectives,
-                ev.summary[:120],
+        # ── Stage 5: Routing ───────────────────────────────────────────────────
+        try:
+            await self._router.route(scored, decisions)
+        except Exception as exc:
+            emit("perception.error", "perception", {"msg": f"Router crashed: {exc}"}, level="error")
+
+    async def _process_bundle(self, signals: list[ScoredSignal]) -> list[dict]:
+        """
+        Process a bundle of signals through a single LLM call.
+        Returns a list of decision dicts with keys: index, priority, action, summary, reason.
+        """
+        import json
+        import time
+
+        # Build the signal block for the prompt
+        signal_block_lines = []
+        for i, signal in enumerate(signals):
+            timestamp = int(signal.representative.timestamp.timestamp())
+            source = signal.representative.source.identifier
+            channel = signal.representative.channel_id or "unknown"
+            authority = signal.authority_score
+            text = signal.representative.text
+
+            signal_block_lines.append(
+                f"[{i}] source={source} channel={channel} authority={authority:.2f} time={timestamp}\n"
+                f'    "{text}"'
             )
 
-        # ── Stage 6: Routing ───────────────────────────────────────────────────
-        try:
-            await self._router.route(events)
-        except Exception as exc:
-            logger.error("PerceptionLayer: Router crashed. error=%s", exc, exc_info=True)
+        signal_block = "\n\n".join(signal_block_lines)
 
-    def _get_world_summary(self) -> str:
-        """
-        Return a brief world model summary for the Synthesizer prompt.
-        In the current architecture the perception layer does not hold the full
-        GoalState, so this returns a stub unless the caller provides a richer
-        world_model implementation with a `summarize()` method.
-        """
-        if hasattr(self._world_model, "summarize"):
-            try:
-                return self._world_model.summarize()  # type: ignore[attr-defined]
-            except Exception:
-                pass
-        pending = self._world_model.pending_perceptions.qsize()
-        return f"Pending perceptions in queue: {pending}"
+        system_prompt = """\
+You are the perception layer of an autonomous AI agent system called Noesis.
+You have received a batch of signals from multiple sources since the last
+processing cycle. Analyze all signals together and return a structured JSON
+decision for each one.
+
+For each signal, decide:
+- priority: "high", "medium", or "low"
+- action: "interrupt", "queue", or "drop"
+  - interrupt = wake GoalManager immediately
+  - queue = add to next GoalManager cycle context
+  - drop = ignore entirely
+- summary: one sentence describing what this signal means in context of the
+  others (can reference other signals in the batch)
+- reason: one sentence explaining your action decision
+
+Use authority_score as a strong signal. A score below 0.3 should rarely
+result in "interrupt". Obvious noise (very short, punctuation only, bot
+commands starting with !) should be "drop".
+
+Return ONLY a JSON array. One object per signal, in the same order received.
+Schema per object:
+{
+  "index": <int>,
+  "priority": "high" | "medium" | "low",
+  "action": "interrupt" | "queue" | "drop",
+  "summary": "<string>",
+  "reason": "<string>"
+}
+"""
+
+        user_prompt = f"""\
+SIGNALS:
+{signal_block}
+"""
+
+        request = ModelRequest(
+            tier=ModelTier.NANO,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            component="PerceptionLayer._process_bundle",
+        )
+
+        response = await self._router_llm.complete(request)
+        raw_content = response.content
+
+        if not raw_content:
+            emit("perception.warning", "perception", {"msg": "LLM returned empty content."}, level="warn")
+            raise ValueError("Empty LLM response")
+
+        # Parse the JSON response
+        try:
+            cleaned = _clean_llm_json(raw_content)
+            data = json.loads(cleaned)
+
+            if not isinstance(data, list):
+                data = [data]
+
+            # Validate basic structure
+            for item in data:
+                if not isinstance(item, dict):
+                    raise ValueError("Decision item is not a dict")
+                if "index" not in item or "action" not in item:
+                    raise ValueError("Decision item missing required fields")
+
+            return data
+
+        except (json.JSONDecodeError, ValueError) as parse_err:
+            emit(
+                event="perception.warning",
+                layer="perception",
+                level="warn",
+                data={
+                    "msg": f"JSON parse failed ({parse_err})",
+                    "raw_response": raw_content[:500],
+                }
+            )
+            raise

@@ -1,4 +1,4 @@
-# main/config/model_router.yaml
+# config/model_router.yaml
 # Configuration for the ModelRouter - single authority over model selection
 
 tiers:
@@ -27,7 +27,7 @@ tiers:
     fallbacks:
       - "groq/openai/gpt-oss-120b"
       - "groq/qwen/qwen3-32b"
-    context_budget: 32000
+    context_budget: 64000
     max_response_tokens: 4000
     temperature: 0.4
     timeout_seconds: 60.0

@@ -27,11 +27,9 @@ that higher urgency = lower number = popped first.
 from __future__ import annotations
 
 import asyncio
-import logging
 
 from perception.schemas import ResponseJob
-
-logger = logging.getLogger("noesis.perception")
+from utils.log_writer import emit
 
 
 class ReactivePool:
@@ -65,7 +63,7 @@ class ReactivePool:
         if self._running:
             return
         self._running = True
-        logger.info("ReactivePool: starting %d worker(s).", self.max_workers)
+        emit("perception.pool_started", "perception", {"workers": self.max_workers})
         for i in range(self.max_workers):
             task = asyncio.create_task(
                 self._worker(i), name=f"reactive-worker-{i}"
@@ -79,15 +77,21 @@ class ReactivePool:
             task.cancel()
         await asyncio.gather(*self._worker_tasks, return_exceptions=True)
         self._worker_tasks.clear()
-        logger.info("ReactivePool: stopped.")
+        emit("perception.pool_stopped", "perception", {})
 
     async def enqueue(self, job: ResponseJob) -> None:
         """Add a job to the priority queue. Higher urgency = processed first."""
         priority = -job.priority  # negate so highest urgency pops first
         await self._queue.put((priority, job))
-        logger.debug(
-            "ReactivePool: enqueued job_id=%s  urgency=%.2f  queue_size=%d",
-            job.id, job.priority, self._queue.qsize(),
+        emit(
+            event="perception.job_enqueued",
+            layer="perception",
+            level="debug",
+            data={
+                "job_id": str(job.id),
+                "urgency": job.priority,
+                "queue_size": self._queue.qsize(),
+            }
         )
 
     # ── Private ───────────────────────────────────────────────────────────────
@@ -95,15 +99,21 @@ class ReactivePool:
     async def _worker(self, worker_id: int) -> None:
         """Long-running worker coroutine — pulls jobs and executes them."""
         label = f"worker-{worker_id}"
-        logger.debug("ReactivePool: %s started.", label)
+        emit("perception.worker_started", "perception", {"worker": label}, level="debug")
         while True:
             try:
                 _, job = await self._queue.get()
                 job.assigned_worker = label
                 job.status = "running"
-                logger.info(
-                    "ReactivePool: %s handling job_id=%s  event_type=%s  urgency=%.2f",
-                    label, job.id, job.event.type.value, job.priority,
+                emit(
+                    event="perception.job_started",
+                    layer="perception",
+                    data={
+                        "worker": label,
+                        "job_id": str(job.id),
+                        "event_type": job.event.type.value,
+                        "urgency": job.priority,
+                    }
                 )
                 try:
                     await asyncio.wait_for(
@@ -111,23 +121,35 @@ class ReactivePool:
                         timeout=self.executor_timeout,
                     )
                     job.status = "done"
-                    logger.info("ReactivePool: %s job_id=%s done.", label, job.id)
+                    emit("perception.job_done", "perception", {"worker": label, "job_id": str(job.id)})
                 except asyncio.TimeoutError:
                     job.status = "failed"
-                    logger.error(
-                        "ReactivePool: %s job_id=%s timed out after %.1fs.",
-                        label, job.id, self.executor_timeout,
+                    emit(
+                        event="perception.job_timeout",
+                        layer="perception",
+                        level="error",
+                        data={
+                            "worker": label,
+                            "job_id": str(job.id),
+                            "timeout": self.executor_timeout,
+                        }
                     )
                 except Exception as exc:
                     job.status = "failed"
-                    logger.error(
-                        "ReactivePool: %s job_id=%s failed: %s",
-                        label, job.id, exc, exc_info=True,
+                    emit(
+                        event="perception.job_failed",
+                        layer="perception",
+                        level="error",
+                        data={
+                            "worker": label,
+                            "job_id": str(job.id),
+                            "error": str(exc),
+                        }
                     )
                 finally:
                     self._queue.task_done()
             except asyncio.CancelledError:
-                logger.debug("ReactivePool: %s cancelled — shutting down.", label)
+                emit("perception.worker_cancelled", "perception", {"worker": label}, level="debug")
                 raise
 
 
@@ -143,7 +165,12 @@ async def _noop_executor(job: ResponseJob) -> None:
             executor = ReactiveExecutor(job, llm_service, model)
             await executor.run()
     """
-    logger.info(
-        "ReactivePool[noop]: job_id=%s  event_type=%s  summary=%r",
-        job.id, job.event.type.value, job.event.summary[:100],
+    emit(
+        event="perception.noop_executor",
+        layer="perception",
+        data={
+            "job_id": str(job.id),
+            "event_type": job.event.type.value,
+            "summary": job.event.summary[:100],
+        }
     )

@@ -19,12 +19,10 @@ from env).  A message claiming to be from an operator is NOT an operator message
 
 from __future__ import annotations
 
-import logging
 from datetime import datetime, timedelta, timezone
 
 from perception.schemas import DeduplicatedSignal, ScoredSignal, SourceType
-
-logger = logging.getLogger("noesis.perception")
+from utils.log_writer import emit
 
 # Base scores per source type — keep in sync with spec §4
 _BASE_SCORES: dict[SourceType, float] = {
@@ -63,23 +61,23 @@ class AuthorityScorer:
 
     def score(self, signal: DeduplicatedSignal) -> ScoredSignal:
         """Compute authority score and return a ScoredSignal."""
-        if signal.perception_type is None:
-            raise ValueError(
-                "AuthorityScorer received a signal without a perception_type. "
-                "Ensure the Classifier runs before the AuthorityScorer."
-            )
-
         base = self._base_score(signal.representative.source.type)
         freq_bonus = min(_FREQ_BONUS_CAP, signal.frequency * _FREQ_BONUS_PER_SIGNAL)
         rec_bonus = self._recency_bonus(signal.representative.timestamp)
         final = min(1.0, base + freq_bonus + rec_bonus)
 
-        logger.debug(
-            "AuthorityScorer: signal id=%s  source_type=%s  "
-            "base=%.2f  freq_bonus=%.2f  rec_bonus=%.2f  → score=%.2f",
-            signal.representative.id,
-            signal.representative.source.type.value,
-            base, freq_bonus, rec_bonus, final,
+        emit(
+            event="perception.scored",
+            layer="perception",
+            level="debug",
+            data={
+                "signal_id": signal.representative.id,
+                "source_type": signal.representative.source.type.value,
+                "base": base,
+                "freq_bonus": freq_bonus,
+                "rec_bonus": rec_bonus,
+                "score": final,
+            }
         )
 
         return ScoredSignal(
