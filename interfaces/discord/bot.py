@@ -4,24 +4,29 @@ interfaces/discord/bot.py
 Discord frontend for the Noesis autonomous agent.
 Uses discord.py-self (user-account / selfbot mode).
 
-Dual-mode input routing
-───────────────────────
-• Messages from the HUMAN_USERNAME (default: "psilko")
-    → treated as HUMAN INPUT → submitted to the trigger store which runs an
-      AgentExecutor in the background daemon.
+Strict Input Segregation (Specification: Component 1)
+──────────────────────────────────────────────────────
+Human Operator (HUMAN_USERNAME — default: "psilko")
+    Treated as a DIRECT COMMAND.  The PerceptionLayer is completely bypassed.
+    The raw message is submitted directly to trigger_store.submit(source="human")
+    and a 🚀 reaction is added.  The daemon fast-lanes human triggers immediately.
+    Optionally prefix "!" for a lightweight executor path instead of GoalManager.
 
-• Messages from anyone else in the same channel
-    → treated as NEUTRAL CONTEXT → the agent responds autonomously to them
-      (one-shot executor reply), i.e. the agent *talks back* like a normal
-      participant while continuing any in-flight work.
+Neutral Users (anyone else)
+    Treated as ENVIRONMENTAL NOISE.  Submitted to perception_layer.ingest(signal)
+    with a ⏳ reaction.  The agent never replies conversationally to neutral users.
+    Messages are batched by the IntakeBuffer and evaluated by the perception
+    pipeline before any action is taken.
 
 Lifecycle
 ─────────
   1. Client connects, prints ready message.
-  2. psilko sends a message in any channel → trigger queued, executor runs.
+  2. psilko sends a message → trigger queued, TriageDispatcher evaluates,
+     Fast-Path or GoalManager runs.
   3. Agent streams events; final answers are posted back to the channel.
-  4. Other users chat → agent replies with a quick autonomous response.
+  4. Other users chat → perception pipeline absorbs the signal (no direct reply).
 """
+
 
 import asyncio
 import os
@@ -285,20 +290,23 @@ async def on_message(message: discord.Message):
         await _handle_neutral_message(message)
 
 
-# ── Human-operator handling ───────────────────────────────────────────────────
+# ── Human-operator handling ──────────────────────────────────────────────
 
 async def _handle_human_message(message: discord.Message) -> None:
     """
-    Messages from the designated human operator.  Two routing modes:
+    Direct Command path — Authorised operator only.
 
-    • No prefix  →  GoalManager (source="human")
+    Principle: Strict Input Segregation. The PerceptionLayer is COMPLETELY
+    BYPASSED. The raw message is submitted directly to trigger_store so that
+    the daemon can fast-lane it without any perception overhead.
+
+    Two routing modes:
+    • No prefix  →  source="human" (GoalManager via Slow-Path on triage)
         Full multi-cycle reasoning, sub-task decomposition, run logs.
-        The daemon fast-lanes human triggers immediately.
         Example: "research the latest AI papers and summarise them"
 
-    • QUICK_PREFIX ("!")  →  AgentExecutor (source="executor")
-        Lightweight single-turn execution — no GoalManager overhead.
-        Strip the prefix, run directly, reply fast.
+    • QUICK_PREFIX ("!")  →  source="executor" (lightweight single-turn)
+        Strip the prefix and submit directly.  Triage may still Fast-Path it.
         Example: "! send a message to john saying hello"
     """
     text = message.content.strip()
@@ -349,16 +357,22 @@ async def _handle_human_message(message: discord.Message) -> None:
     await message.add_reaction("🚀")
 
 
-# ── Neutral-user handling ─────────────────────────────────────────────────────
+# ── Neutral-user handling ───────────────────────────────────────────────
 
 async def _handle_neutral_message(message: discord.Message) -> None:
     """
-    Messages from anyone who is NOT the human operator (psilko).
-    Flows through the PerceptionLayer:
-      ingest → deduplicate → classify → authority score → synthesize → route
-    Queries/directives trigger an immediate AgentExecutor response via the
-    ReactivePool.  Information signals update the WorldModel for the next
-    GoalManager cycle.
+    Environmental Noise path — all non-operator users.
+
+    Principle: Resource Conservation + Strict Segregation.
+    The agent NEVER replies conversationally to neutral users.
+    The message is treated as a raw signal and passed to the PerceptionLayer,
+    which batches it through IntakeBuffer (subject to the ≥3 OR HIGH threshold)
+    before the pipeline processes it.
+
+    Flow: ingest → deduplicate → classify → authority score → synthesize → route
+    Queries/directives may eventually trigger an AgentExecutor response via the
+    ReactivePool if they clear the perception pipeline.  Information signals
+    update the WorldModel for the next GoalManager cycle.
     """
     current_text = message.content.strip()
     context = await _fetch_context(message.channel, before_message=message)
@@ -424,8 +438,8 @@ async def _listen_to_event_bus() -> None:
         while True:
             event = await q.get()
 
-            # Forward events for operator and discord-sourced triggers.
-            if event.get("trigger_source") not in ("human", "executor", "discord"):
+            # Forward events for operator, discord-sourced, and agent-sourced triggers.
+            if event.get("trigger_source") not in ("human", "executor", "discord", "agent"):
                 continue
 
             metadata = event.get("trigger_metadata", {})

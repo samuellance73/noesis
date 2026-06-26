@@ -8,35 +8,41 @@ Responsibilities (and ONLY these):
   1. Wake up periodically (poll interval)
   2. Immediately wake when a human trigger arrives (fast-lane)
   3. Drain all pending triggers from TriggerStore
-  4. Route each trigger to the right agent and run it
+  4. Route each trigger through the TriageDispatcher, then to the right agent
   5. Publish all agent events to the EventBus so SSE clients receive them
   6. Update trigger status (processing → done/failed)
+  7. Invoke SelfInitiativeEngine when the store is idle
 
 Routing strategy
 ────────────────
-  • source == "human"    →  GoalManager
-      The human operator sends intentional, potentially complex tasks.
-      GoalManager breaks them into sub-tasks, runs multiple cycles, and
-      writes full human-readable logs under logs/runs/.
+  Every trigger → TriageDispatcher.evaluate()  →  decision
 
-  • source == "executor" →  AgentExecutor  (operator fast-path via "!" prefix)
-  • source == "discord"  →  AgentExecutor  (neutral user replies)
-  • source == "cron" / "webhook" / etc.  →  AgentExecutor
-      Simple, single-turn responses. Lightweight, no logging overhead.
+  Fast-Path (decision.can_solve_immediately == True):
+      Execute 0 or 1 tool call(s) in-process, publish final_answer, done.
+      GoalManager is NOT invoked.
+
+  Slow-Path (decision.can_solve_immediately == False):
+      Mutate trigger.description with decision.escalation_instructions,
+      then route to GoalManager (human/perception) or AgentExecutor (all else).
 
 Architecture
 ────────────
-  TriggerStore (pending) ──► Daemon ──► GoalManager   (human)    ──► EventBus ──► SSE
-                                   └──► AgentExecutor (all else) ──► EventBus ──► SSE
-                                   ↑
+  TriggerStore (pending) ──► Daemon ──► TriageDispatcher
+                                         ├──► Fast-Path: in-process tool exec ──► EventBus ──► SSE
+                                         └──► Slow-Path: GoalManager / AgentExecutor ──► EventBus
+                                    ↑
                          human_ready.Event (fast-lane, no sleep needed)
+
+  Idle store → SelfInitiativeEngine → submit(source="agent") → TriageDispatcher
 """
 
 import asyncio
 
 from triggers.store import Trigger, trigger_store
+from triggers.triage import TriageDispatcher
 from agents.executor import AgentExecutor
 from agents.goal_manager import GoalManager
+from agents.self_initiative import SelfInitiativeEngine
 from core.model_router import ModelRouter
 from utils.event_bus import event_bus
 from utils.log_writer import emit
@@ -51,11 +57,15 @@ _DAEMON_CYCLE_INTERVAL: float | None = 60.0
 # AgentExecutor iteration cap for non-human (neutral/cron/webhook) triggers.
 _DAEMON_MAX_ITERATIONS = 5
 
+# Singleton self-initiative engine (shared across all daemon ticks).
+_self_initiative = SelfInitiativeEngine()
+
 
 async def _run_trigger(trigger: Trigger, router: ModelRouter) -> None:
     """
-    Route one trigger to the appropriate agent, stream events to the bus,
-    and update the trigger status when done.
+    Route one trigger through the TriageDispatcher, then to the appropriate
+    agent or Fast-Path executor. Stream events to the bus and update trigger
+    status when done.
     """
     emit(
         event="daemon.trigger_dispatched",
@@ -76,10 +86,21 @@ async def _run_trigger(trigger: Trigger, router: ModelRouter) -> None:
     })
 
     try:
-        if trigger.source in ("human", "perception"):
-            await _run_as_goal_manager(trigger, router)
+        # ── Triage: Fast-Path vs Slow-Path ─────────────────────────────────
+        decision = await TriageDispatcher.evaluate(trigger, router)
+
+        if decision.can_solve_immediately:
+            await _run_fast_path(trigger, decision)
         else:
-            await _run_as_executor(trigger, router)
+            # Mutate description with the refined escalation plan before routing
+            if decision.escalation_instructions:
+                trigger.description = decision.escalation_instructions
+
+            if trigger.source in ("human", "perception", "agent"):
+                await _run_as_goal_manager(trigger, router)
+            else:
+                await _run_as_executor(trigger, router)
+        # ───────────────────────────────────────────────────────────────
 
         trigger_store.mark_done(trigger.id)
         emit("daemon.trigger_completed", "daemon", {"trigger_id": str(trigger.id)})
@@ -95,6 +116,50 @@ async def _run_trigger(trigger: Trigger, router: ModelRouter) -> None:
             "message":    error_msg,
         })
         await _update_discord_reaction(trigger, "❌")
+
+
+
+async def _run_fast_path(trigger: Trigger, decision) -> None:
+    """
+    Fast-Path: execute 0 or 1 tool call(s) in-process, then publish the
+    concatenated result as a final_answer event.  GoalManager is bypassed.
+    """
+    from agents.tools import tools_registry  # local import keeps circular deps clean
+
+    output_parts: list[str] = []
+
+    for tool_call in decision.immediate_tool_calls:
+        emit(
+            "daemon.fast_path_tool",
+            "daemon",
+            {
+                "trigger_id": str(trigger.id),
+                "tool": tool_call.tool_name,
+                "input": str(tool_call.tool_input)[:120],
+            },
+        )
+        result = await tools_registry.execute(tool_call.tool_name, tool_call.tool_input)
+        output_parts.append(result)
+
+    if decision.final_answer:
+        output_parts.append(decision.final_answer)
+
+    final_text = "\n".join(output_parts).strip() or "(no output)"
+
+    await event_bus.publish({
+        "event":          "final_answer",
+        "trigger_id":     str(trigger.id),
+        "trigger_source": trigger.source,
+        "trigger_metadata": trigger.metadata or {},
+        "answer":         final_text,
+        "task_goal":      trigger.description[:80],
+        "fast_path":      True,
+    })
+    emit(
+        "daemon.fast_path_complete",
+        "daemon",
+        {"trigger_id": str(trigger.id), "answer_len": len(final_text)},
+    )
 
 
 async def _run_as_goal_manager(trigger: Trigger, router: ModelRouter) -> None:
@@ -151,12 +216,21 @@ async def _update_discord_reaction(trigger: Trigger, emoji: str) -> None:
 
 
 async def _process_batch(router: ModelRouter) -> None:
-    """Drain pending triggers and run them all in parallel."""
+    """Drain pending triggers and run them all in parallel.
+
+    If the store is empty after draining, offer the SelfInitiativeEngine a
+    chance to submit a new autonomous goal for the next tick.
+    """
     pending = trigger_store.get_pending()
     if not pending:
+        # Store is idle — give the self-initiative engine a chance to act
+        submitted = await _self_initiative.maybe_submit(router)
+        if submitted:
+            emit("daemon.self_initiative_triggered", "daemon", {})
         return
     emit("daemon.batch_processing", "daemon", {"count": len(pending)})
     await asyncio.gather(*[_run_trigger(t, router) for t in pending])
+
 
 
 async def start_daemon(

@@ -1,45 +1,34 @@
 """
 perception/layer.py
 ────────────────────
-PerceptionLayer — top-level orchestrator that wires all six pipeline stages
-into a continuously running async loop.
+PerceptionLayer — top-level orchestrator wiring all pipeline stages.
 
-Architecture
-────────────
-  External signal producers call `await layer.ingest(raw_signal)`.
-  The layer runs a background loop (started via `await layer.start()`):
+Architecture (updated)
+──────────────────────
+  while True:
+      batch = await intake_buffer.drain()          # blocks until window/flush/threshold
+      if not batch: continue
+      deduped = deduplicator.deduplicate(batch)    # Stage 2
+      scored  = authority_scorer.score_batch(deduped)  # Stage 3
+      decision = await TriageDispatcher.evaluate_batch(scored, router)  # Stage 4
+      await _execute_batch_decision(scored, decision)  # Stage 5
+          ├─ fast_path_actions   → asyncio.gather (concurrent tool calls + Discord reply)
+          └─ slow_path_escalations → trigger_store.submit(source="perception")
 
-    while True:
-        batch = await intake_buffer.drain()      # blocks until window or flush
-        if not batch:
-            continue
-        try:
-            deduped  = deduplicator.deduplicate(batch)
-            # classify + score each deduplicated signal
-            for ds in deduped:
-                ds.perception_type = classifier.classify(ds)
-            deduped = [s for s in deduped if s.perception_type != NOISE]
-            scored   = authority_scorer.score_batch(classified)
-            events, latency = await synthesizer.synthesize(scored, world_model_summary)
-            await router.route(events)
-        except Exception:
-            log + continue
+One STANDARD-tier LLM call handles the full batch: classify, triage, and generate
+responses for all signals simultaneously.  Complex tasks are isolated in the trigger
+queue and handled by the GoalManager without blocking fast-path execution.
 
-Error isolation
-───────────────
-Each stage is wrapped in try/except.  A crashed stage passes its input through
-unmodified rather than halting the pipeline (§7).  The pipeline loop itself
-never blocks new signal intake regardless of downstream failures.
-
-Logging (§9)
-────────────
-Perception events are logged to logs/perception.log via the
-`noesis.perception` logger, matching the pattern of other log files.
+Error isolation: each stage is wrapped in try/except; a crashed stage never
+halts the pipeline loop.
 """
+
 
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 
 from perception.config import PerceptionConfig
 from perception.reactive_pool import ReactivePool
@@ -54,6 +43,7 @@ from perception.stages.dedup import Deduplicator
 from perception.stages.intake import IntakeBuffer
 from perception.stages.router import Router
 from core.model_router import ModelRouter, ModelRequest, ModelTier
+from triggers.triage import BatchTriageDecision, FastPathAction, SlowPathEscalation, TriageDispatcher
 from utils.log_writer import emit
 from utils.json_parser import _clean_llm_json
 
@@ -265,28 +255,128 @@ class PerceptionLayer:
                 for ds in deduped
             ]
 
-        # ── Stage 4: LLM bundle processing ───────────────────────────────────────
+        # ── Stage 4+5: Batch Triage → Concurrent Execution ────────────────────
         try:
-            decisions = await self._process_bundle(scored)
+            decision = await TriageDispatcher.evaluate_batch(scored, self._router_llm)
         except Exception as exc:
-            emit("perception.warning", "perception", {"msg": f"LLM bundle call failed: {exc}"}, level="warn")
-            decisions = [
-                {"index": i, "priority": "medium", "action": "queue",
-                 "summary": s.representative.text[:100], "reason": "fallback"}
-                for i, s in enumerate(scored)
-            ]
+            emit("perception.warning", "perception",
+                 {"msg": f"Batch triage failed, queueing all signals: {exc}"}, level="warn")
+            for sig in scored:
+                await self._world_model.add_perception_context({
+                    "text": sig.representative.text,
+                    "source": sig.representative.source.identifier,
+                    "channel": sig.representative.channel_id,
+                    "authority": sig.authority_score,
+                })
+            return
 
-        emit(
-            event="perception.classified",
-            layer="perception",
-            data={"decision_count": len(decisions)}
-        )
+        await self._execute_batch_decision(scored, decision)
 
-        # ── Stage 5: Routing ───────────────────────────────────────────────────
-        try:
-            await self._router.route(scored, decisions)
-        except Exception as exc:
-            emit("perception.error", "perception", {"msg": f"Router crashed: {exc}"}, level="error")
+    async def _execute_batch_decision(
+        self,
+        signals: list[ScoredSignal],
+        decision: BatchTriageDecision,
+    ) -> None:
+        """
+        Act on a BatchTriageDecision:
+          • fast_path_actions      → asyncio.gather (concurrent tool calls + Discord reply)
+          • slow_path_escalations  → trigger_store.submit(source="perception")
+          • unlisted signals       → WorldModel context (passive queue)
+        """
+        from triggers.store import trigger_store
+        from agents.tools import tools_registry
+        from utils.callbacks import ServiceRegistry
+
+        model = os.getenv("AGENT_MODEL", "groq/openai/gpt-oss-120b")
+        handled: set[int] = set()
+
+        # ── Fast-path: run all actions concurrently ────────────────────────────
+        async def _run_action(action: FastPathAction) -> None:
+            idx = action.signal_index
+            if idx < 0 or idx >= len(signals):
+                emit("perception.warning", "perception",
+                     {"msg": f"FastPathAction index {idx} out of range"}, level="warn")
+                return
+            sig = signals[idx]
+            meta = sig.representative.metadata or {}
+            channel_id = meta.get("channel_id") or sig.representative.channel_id
+
+            tool_output = ""
+            if action.tool_name:
+                emit("perception.fast_path_tool", "perception",
+                     {"index": idx, "tool": action.tool_name,
+                      "input": str(action.tool_input or "")[:80]})
+                tool_output = await tools_registry.execute(
+                    action.tool_name, action.tool_input or ""
+                )
+
+            reply = action.final_answer
+            if tool_output:
+                reply = f"{reply}\n\n**Output:**\n{tool_output}" if reply else tool_output
+
+            if channel_id and reply:
+                try:
+                    await ServiceRegistry.call(
+                        "send_discord_message",
+                        json.dumps({"channel_id": int(channel_id), "message": reply}),
+                    )
+                except Exception as exc:
+                    emit("perception.warning", "perception",
+                         {"msg": f"Fast-path Discord send failed: {exc}"}, level="warn")
+
+            emit("perception.fast_path_done", "perception",
+                 {"index": idx, "channel": channel_id, "reply_len": len(reply or "")})
+
+        if decision.fast_path_actions:
+            for act in decision.fast_path_actions:
+                handled.add(act.signal_index)
+            results = await asyncio.gather(
+                *[_run_action(act) for act in decision.fast_path_actions],
+                return_exceptions=True,
+            )
+            # Log any exceptions that surfaced from individual actions
+            for i, r in enumerate(results):
+                if isinstance(r, Exception):
+                    emit("perception.warning", "perception",
+                         {"msg": f"Fast-path action {i} raised: {r}"}, level="warn")
+            emit("perception.fast_path_batch_done", "perception",
+                 {"count": len(decision.fast_path_actions)})
+
+        # ── Slow-path: submit to trigger_store for GoalManager ─────────────────
+        for esc in decision.slow_path_escalations:
+            idx = esc.signal_index
+            if idx < 0 or idx >= len(signals):
+                continue
+            handled.add(idx)
+            sig = signals[idx]
+            meta = sig.representative.metadata or {}
+            channel_id = meta.get("channel_id") or sig.representative.channel_id
+            message_id = meta.get("message_id")
+
+            trigger_store.submit(
+                source="perception",
+                description=esc.refined_goal,
+                model=model,
+                metadata={
+                    "channel_id": channel_id,
+                    "message_id": message_id,
+                    "original_signal": sig.representative.text[:200],
+                    "authority": sig.authority_score,
+                },
+            )
+            emit("perception.slow_path_escalated", "perception",
+                 {"index": idx, "goal": esc.refined_goal[:80]})
+
+        # ── Remainder: passive WorldModel context ──────────────────────────────
+        for i, sig in enumerate(signals):
+            if i not in handled:
+                await self._world_model.add_perception_context({
+                    "text": sig.representative.text,
+                    "source": sig.representative.source.identifier,
+                    "channel": sig.representative.channel_id,
+                    "authority": sig.authority_score,
+                })
+
 
     async def _process_bundle(self, signals: list[ScoredSignal]) -> list[dict]:
         """

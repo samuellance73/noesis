@@ -9,7 +9,18 @@ Prevents each individual message from triggering a pipeline run.
 Flush triggers (in priority order):
   1. High-priority signal arrives          → immediate flush (bypass window)
   2. Buffer reaches max_size               → immediate flush
-  3. window_seconds elapses without flush  → flush on timeout
+  3. window_seconds elapses without flush  → flush on timeout, IF the batch
+     passes the intake threshold (see below).
+
+Intake threshold (resource conservation)
+─────────────────────────────────────────
+After a window timeout, the buffer is flushed ONLY if at least one of these
+conditions is met:
+  • len(buffer) >= 3   (enough signal volume to justify a pipeline run)
+  • ANY signal in the buffer has Priority.HIGH
+
+If neither condition is met, the signals are left in the buffer and an empty
+list is returned.  They will be carried over to the next window and retested.
 
 Buffer is *lossy* at max_size: when the queue is already full, the oldest
 non-high-priority signal is dropped to make room for the incoming one.
@@ -76,18 +87,39 @@ class IntakeBuffer:
         """
         Wait for window_seconds OR the flush trigger, then return all buffered
         signals and reset for the next window.
+
+        Intake threshold (applied only on timeout, not on forced flushes):
+        If the window expires and the buffer contains fewer than 3 signals with
+        no Priority.HIGH signals, do nothing — return an empty list and leave
+        the signals in the buffer for the next window.
         """
+        timed_out = False
         try:
             await asyncio.wait_for(
                 self.flush_trigger.wait(),
                 timeout=self.window_seconds,
             )
         except asyncio.TimeoutError:
-            pass  # Normal window expiry — proceed with whatever's buffered
+            timed_out = True  # Normal window expiry
 
         self.flush_trigger.clear()
 
         async with self._lock:
+            # ── Intake threshold check (only on timeout, not on forced flush) ──
+            if timed_out:
+                has_high = any(s.priority == Priority.HIGH for s in self._buffer)
+                if len(self._buffer) < 3 and not has_high:
+                    emit(
+                        "perception.intake_threshold_not_met",
+                        "perception",
+                        {
+                            "buffered": len(self._buffer),
+                            "msg": "Threshold not met (< 3 signals, no HIGH); holding signals.",
+                        },
+                        level="debug",
+                    )
+                    return []  # Leave signals in buffer; carry over to next window
+
             batch = list(self._buffer)
             self._buffer.clear()
 

@@ -284,18 +284,29 @@ class GoalManager:
             )
 
             # ── 5. Stream progress to caller ──────────────────────────────
-            emit("strategic.cycle_complete", "strategic", {
-                "progress": decision.progress_update,
-                "completed": [t.goal for t in goal_state.completed],
-                "failed": [f.goal for f in goal_state.failed_tasks],
-                "cycle": cycle
-            }, run_id=run_id)
+            emit(
+                event="strategic.cycle_complete", 
+                layer="strategic", 
+                data={
+                    "progress": decision.progress_update,
+                    "completed": [t.goal for t in goal_state.completed],
+                    "failed": [f.goal for f in goal_state.failed_tasks],
+                    "cycle": cycle,
+                    # Serialize the full active mind state to the JSONL log line:
+                    "objectives": [obj.model_dump() for obj in goal_state.objectives],
+                    "world_model": goal_state.world_model.model_dump(),
+                }, 
+                run_id=run_id
+            )
+            
             yield {
                 "event":            "cycle_complete",
                 "cycle":            cycle,
                 "progress_update":  decision.progress_update,
                 "completed_tasks":  [t.goal for t in goal_state.completed],
                 "open_questions":   goal_state.open_questions,
+                "objectives":       [obj.model_dump() for obj in goal_state.objectives],
+                "world_model":      goal_state.world_model.model_dump(),
             }
 
             # ── 6. Check completion ───────────────────────────────────────
