@@ -34,7 +34,7 @@ import asyncio
 from typing import Any, AsyncGenerator
 
 from utils.json_parser import parse_llm_json
-from utils.log_writer import emit, clear_log
+from utils.log_writer import emit
 
 from core.model_router import ModelRouter, ModelRequest, ModelTier
 from .executor import AgentExecutor
@@ -190,8 +190,7 @@ class GoalManager:
         if not run_id:
             run_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{str(uuid.uuid4())[:4]}"
         
-        # Clear agent.jsonl at start of new autonomous run
-        clear_log()
+        # Clear agent.jsonl is now handled at main.py startup
         
         goal_state = GoalState(ultimate_goal=ultimate_goal)
         goal_state.mission = Mission(statement=ultimate_goal, domain="general")

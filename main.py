@@ -9,6 +9,9 @@ _ssl.apply()
 
 load_dotenv(override=True)
 
+from utils.log_writer import clear_log
+clear_log()
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
