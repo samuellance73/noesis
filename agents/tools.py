@@ -194,30 +194,10 @@ async def run_command(command: str) -> str:
     description="Send a message to a specific Discord channel. Input must be a JSON string with 'channel_id' (integer) and 'message' (string), e.g. {\"channel_id\": 123456789, \"message\": \"Hello!\"}",
 )
 async def send_discord_message(payload_json: str) -> str:
-    import json
+    from utils.callbacks import ServiceRegistry
     try:
-        data = json.loads(payload_json)
-        channel_id = int(data["channel_id"])
-        message_text = str(data["message"])
-    except Exception as e:
-        return f"Error: Input must be a valid JSON string with 'channel_id' and 'message'. Parse error: {e}"
-
-    try:
-        from interfaces.discord.bot import bot as discord_bot
-        from interfaces.discord.bot import _send
-
-        if not discord_bot.is_ready():
-            return "Error: Discord bot is not logged in / ready."
-
-        channel = discord_bot.get_channel(channel_id)
-        if not channel:
-            channel = await discord_bot.fetch_channel(channel_id)
-
-        if not channel:
-            return f"Error: Channel with ID {channel_id} not found."
-
-        await _send(channel, message_text)
-        return f"Success: Message sent to channel {channel_id}."
+        # Simply delegate execution to the service registry
+        return await ServiceRegistry.call("send_discord_message", payload_json)
     except Exception as e:
         return f"Error sending message: {e}"
 

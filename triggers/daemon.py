@@ -142,30 +142,11 @@ async def _update_discord_reaction(trigger: Trigger, emoji: str) -> None:
     if not channel_id or not message_id:
         return
 
+    from utils.callbacks import ServiceRegistry
     try:
-        from interfaces.discord.bot import bot as discord_bot
-        import discord
-        if not discord_bot.is_ready():
-            return
-
-        channel = discord_bot.get_channel(channel_id)
-        if not channel:
-            channel = await discord_bot.fetch_channel(channel_id)
-        if not channel:
-            return
-
-        message = await channel.fetch_message(message_id)
-        if message:
-            try:
-                await message.clear_reaction("⏳")
-            except discord.HTTPException:
-                pass
-            try:
-                await message.add_reaction(emoji)
-            except discord.HTTPException:
-                pass
+        await ServiceRegistry.call("update_discord_reaction", int(channel_id), int(message_id), emoji)
     except Exception as e:
-        emit("daemon.warning", "daemon", {"msg": f"Failed to update Discord reaction: {e}"}, level="warn")
+        emit("daemon.warning", "daemon", {"msg": f"Failed to update Discord reaction callback: {e}"}, level="warn")
 
 
 

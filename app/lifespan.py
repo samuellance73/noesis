@@ -151,6 +151,10 @@ async def _start_discord(app: FastAPI) -> "asyncio.Task | None":
         return None
 
     from interfaces.discord.bot import bot as discord_bot
+    
+    # Inject perception layer into the bot instance dynamically
+    discord_bot.perception_layer = app.state.perception
+    
     task = asyncio.create_task(discord_bot.start(token))
     app.state.discord_task = task
     return task

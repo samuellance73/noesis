@@ -33,6 +33,7 @@ from triggers.store import trigger_store
 from utils.event_bus import event_bus
 from perception.schemas import RawSignal, RawSignalSource, SourceType, Priority
 from utils.log_writer import emit
+from utils.callbacks import ServiceRegistry
 
 # ── Config ────────────────────────────────────────────────────────────────────
 # Username (not display name) that is treated as the human operator.
@@ -214,12 +215,49 @@ def _format_event(event: dict) -> Optional[str]:
 bot = discord.Client()
 
 
+async def _send_message_callback(payload_json: str) -> str:
+    import json
+    data = json.loads(payload_json)
+    channel_id = int(data["channel_id"])
+    message_text = str(data["message"])
+    
+    if not bot.is_ready():
+        return "Error: Discord bot is not logged in / ready."
+        
+    channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
+    if not channel:
+        return f"Error: Channel with ID {channel_id} not found."
+        
+    await _send(channel, message_text)
+    return f"Success: Message sent to channel {channel_id}."
+
+async def _update_reaction_callback(channel_id: int, message_id: int, emoji: str) -> None:
+    if not bot.is_ready():
+        return
+    channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
+    if not channel:
+        return
+    message = await channel.fetch_message(message_id)
+    if message:
+        try:
+            await message.clear_reaction("⏳")
+        except Exception:
+            pass
+        try:
+            await message.add_reaction(emoji)
+        except Exception:
+            pass
+
 @bot.event
 async def on_ready():
     emit("discord.ready", "system", {"user": str(bot.user), "id": bot.user.id})
     print(f"✅ Discord selfbot ready — logged in as {bot.user} ({bot.user.id})")
     print(f"   Human operator : {HUMAN_USERNAME!r}")
     print(f"   Default model  : {DEFAULT_MODEL}")
+
+    # Register our decoupled service callbacks
+    ServiceRegistry.register("send_discord_message", _send_message_callback)
+    ServiceRegistry.register("update_discord_reaction", _update_reaction_callback)
 
     # Start event bus listener to route daemon events back to Discord channels.
     asyncio.ensure_future(_listen_to_event_bus())
@@ -363,13 +401,11 @@ async def _handle_neutral_message(message: discord.Message) -> None:
         },
     )
 
-    # Lazy-import to avoid circular dependencies at module load time.
-    from main import app as _app  # noqa: PLC0415
-    try:
-        await _app.state.perception.ingest(signal)
-    except AttributeError:
-        # Perception layer not yet started (e.g. during tests) — fall back.
-        emit("discord.warning", "system", {"msg": f"PerceptionLayer not available; dropping neutral message from {message.author.name}."}, level="warn")
+    # Access perception layer through instance variable injected at startup
+    if hasattr(bot, "perception_layer") and bot.perception_layer:
+        await bot.perception_layer.ingest(signal)
+    else:
+        emit("discord.warning", "system", {"msg": "PerceptionLayer not initialized on bot; dropping message."}, level="warn")
         return
 
     emit("discord.ingested", "system", {"author": message.author.name, "channel_id": message.channel.id})
