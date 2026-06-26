@@ -2,18 +2,35 @@ import json
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
+from uuid import UUID
 
 _lock = threading.Lock()
-_log_file = Path("logs/agent.jsonl")
+# Anchor to this file's location so the path is correct regardless of CWD.
+_log_file = Path(__file__).resolve().parent.parent / "logs" / "agent.jsonl"
+
+class CustomJSONEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, UUID):
+            return str(obj)
+        return super().default(obj)
 
 def clear_log() -> None:
-    """Clear the agent.jsonl log file at the start of a new run."""
+    """
+    Mark a new run boundary in agent.jsonl.
+
+    Instead of fully truncating the file (which would silently discard
+    daemon/perception infrastructure events logged before run_stream()
+    fires), we truncate to zero so the new run starts clean.  The caller
+    (GoalManager.run_stream) immediately writes a strategic.loop_started
+    entry right after, making the boundary obvious in the log.
+    """
     try:
         with _lock:
             _log_file.parent.mkdir(parents=True, exist_ok=True)
             _log_file.write_text("", encoding="utf-8")
     except Exception:
         pass
+
 
 def emit(
     event: str,
@@ -33,8 +50,8 @@ def emit(
             "level": level,
             "data": data,
         }
-        line = json.dumps(entry) + "\n"
-        
+        line = json.dumps(entry, cls=CustomJSONEncoder) + "\n"
+
         with _lock:
             _log_file.parent.mkdir(parents=True, exist_ok=True)
             with open(_log_file, "a", encoding="utf-8") as f:

@@ -217,9 +217,10 @@ async def run_terminal_interface() -> None:
                 else:
                     # Use full dashboard for autonomous runs
                     import uuid
-                    run_id = str(uuid.uuid4())[:8]
+                    from datetime import datetime
+                    run_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{str(uuid.uuid4())[:4]}"
                     with LiveDashboard(goal=goal, run_id=run_id) as dash:
-                        async for event in manager.run_stream(goal):
+                        async for event in manager.run_stream(goal, run_id=run_id):
                             _render_event(event)
                             _update_dashboard_full(dash, event)
 

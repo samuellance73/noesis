@@ -83,7 +83,13 @@ When spawning sub-tasks in `tasks_to_spawn`, you must select the most appropriat
 - "research" : access to `web_search` only (information gathering).
 - "code"     : access to `python_execute` and `run_command` (computation/scripting).
 - "synthesis": no tools (pure reasoning or text generation from context).
-- "full"      : access to all registered tools (general tasks).
+- "full"      : access to ALL registered tools, including `send_discord_message`.
+
+CRITICAL TOOL ROUTING RULES:
+- To send a Discord message, ALWAYS use executor_type="full" and instruct it to use the `send_discord_message` tool.
+  The tool accepts a JSON string: {"channel_id": <int>, "message": "<text>"}
+  This routes through the live selfbot connection and is the ONLY reliable way to send messages.
+  Do NOT spawn a "code" executor to call the Discord REST API directly — the token auth is complex and error-prone.
 
 You will receive the current goal state (which contains the Mission, Objectives, and a structured World Model) \
 and any new user messages. You must output a single valid JSON object matching this schema:
@@ -176,9 +182,13 @@ class GoalManager:
 
     # ── Main autonomous loop ──────────────────────────────────────────────────
 
-    async def run_stream(self, ultimate_goal: str) -> AsyncGenerator[dict, None]:
+    async def run_stream(self, ultimate_goal: str, run_id: str | None = None) -> AsyncGenerator[dict, None]:
+        from datetime import datetime
         import uuid
-        run_id = str(uuid.uuid4())[:8]
+        import shutil
+        
+        if not run_id:
+            run_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{str(uuid.uuid4())[:4]}"
         
         # Clear agent.jsonl at start of new autonomous run
         clear_log()
@@ -190,6 +200,14 @@ class GoalManager:
         runs_root = Path("logs") / "runs"
         run_dir = runs_root / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Keep only the 10 most recent runs, sorted by time order
+        try:
+            all_runs = sorted([d for d in runs_root.iterdir() if d.is_dir()], key=lambda d: d.name, reverse=True)
+            for old_run in all_runs[10:]:
+                shutil.rmtree(old_run, ignore_errors=True)
+        except Exception:
+            pass
         
         episodic_store = EpisodicStore()
         episodic_writer = EpisodicWriter(run_dir)
@@ -308,7 +326,7 @@ class GoalManager:
                 return
 
             # ── 7. Enforce minimum cycle interval (pacing) ────────────────
-            await self._pace_cycle(cycle, cycle_start_time)
+            await self._pace_cycle(cycle, cycle_start_time, run_id)
             if self.cycle_interval_seconds and cycle < self.max_cycles:
                 elapsed  = asyncio.get_event_loop().time() - cycle_start_time
                 throttle = self.cycle_interval_seconds - elapsed
@@ -567,7 +585,7 @@ class GoalManager:
             goal_state.open_questions = decision.updated_open_questions
 
 
-    async def _pace_cycle(self, cycle: int, cycle_start_time: float) -> None:
+    async def _pace_cycle(self, cycle: int, cycle_start_time: float, run_id: str) -> None:
         """Sleep to enforce the minimum cycle wall-time, if configured."""
         if not self.cycle_interval_seconds or cycle >= self.max_cycles:
             return

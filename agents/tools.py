@@ -87,7 +87,11 @@ async def web_search(query: str) -> str:
         "You can read these secret keys securely inside your Python code using 'os.environ.get(...)'. "
         "Do NOT hardcode keys in your written code; always fetch them dynamically:\n"
         "- os.environ.get('GITHUB_TOKEN') is pre-loaded with your GitHub access token.\n"
-        "- os.environ.get('TELEGRAM_BOT_TOKEN') is pre-loaded with your Telegram bot key."
+        "- os.environ.get('TELEGRAM_BOT_TOKEN') is pre-loaded with your Telegram bot key.\n"
+        "- os.environ.get('DISCORD_BOT_TOKEN') is a SELFBOT / USER-ACCOUNT token (not a bot application token). "
+        "When making raw Discord API calls with this token, use 'Authorization: <token>' (NO 'Bot' prefix). "
+        "Example header: {'Authorization': token, 'Content-Type': 'application/json'}. "
+        "Do NOT use 'Authorization: Bot <token>' — that will return 401 Unauthorized."
     ),
 )
 async def python_execute(code: str) -> str:

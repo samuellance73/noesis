@@ -68,10 +68,10 @@ class AgentExecutor:
             f"AVAILABLE TOOLS:\n{tool_docs}\n\n"
             "RULES:\n"
             "1. You MUST respond ONLY with a single valid JSON object.\n"
-            "2. If the request is simple (chit-chat, basic questions you already know), provide a 'final_answer' immediately. DO NOT call tools.\n"
-            "3. If the request requires information you don't have, call tools. You MAY call MULTIPLE tools at once — they will run concurrently.\n"
-            "4. Do not call tools if you already know the answer.\n"
-            "5. Once you have enough information from tool results, produce a 'final_answer'. Do not keep calling tools.\n\n"
+            "2. For tasks requiring actions or side-effects (e.g. sending a Discord message, running terminal commands, creating/modifying files), you MUST invoke the appropriate tool to perform the action. DO NOT output a 'final_answer' claiming the action was done without executing the tool call first.\n"
+            "3. For information gathering or Q&A tasks, if you already know the answer or the request is simple (like basic greetings), provide a 'final_answer' immediately and DO NOT call tools.\n"
+            "4. If you need to gather information or execute side-effects, call the necessary tools. You may call multiple tools concurrently.\n"
+            "5. Once you have successfully called the required action tools and/or gathered enough information, produce your 'final_answer' detailing the results.\n\n"
             "RESPONSE FORMAT:\n"
             "{\n"
             '  "thought": "Your internal reasoning, planning, or synthesis of available information.",\n'
@@ -185,9 +185,9 @@ class AgentExecutor:
             yield {"event": "thought", "thought": parsed_step.thought, "step_index": i}
 
             # ── Fast exit: final answer with no tool calls ──────────────
-            if parsed_step.final_answer:
+            if parsed_step.final_answer and not parsed_step.tool_calls:
                 state.steps.append({"step": parsed_step.model_dump(), "observation": None})
-                emit("tactical.final_answer", "tactical", {"iteration": iteration_num})
+                emit("tactical.final_answer", "tactical", {"iteration": iteration_num, "answer": parsed_step.final_answer})
                 yield {"event": "final_answer", "answer": parsed_step.final_answer, "step_index": i}
                 return
 
@@ -232,6 +232,12 @@ class AgentExecutor:
                     "observation": combined_observation,
                     "step_index":  i,
                 }
+
+                # If the model also provided a final answer in the same step, emit it now
+                if parsed_step.final_answer:
+                    emit("tactical.final_answer", "tactical", {"iteration": iteration_num, "answer": parsed_step.final_answer})
+                    yield {"event": "final_answer", "answer": parsed_step.final_answer, "step_index": i}
+                    return
 
             else:
                 # Model returned neither a tool call nor a final answer — nudge it

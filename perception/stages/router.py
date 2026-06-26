@@ -87,15 +87,22 @@ class Router:
             from triggers.store import trigger_store
             model = os.getenv("AGENT_MODEL", "groq/openai/gpt-oss-120b")
             
+            sig_meta = signal.representative.metadata or {}
+            # Use the full text (which includes context) rather than just the current message
+            description = signal.representative.text if signal.representative.text else summary
+
             trigger_store.submit(
-                description=summary,
+                description=description,
                 source="perception",
                 model=model,
                 metadata={
                     "original_signal": signal.representative.text,
+                    "channel_id": sig_meta.get("channel_id") or signal.representative.channel_id,
+                    "message_id": sig_meta.get("message_id"),
                     "channel": signal.representative.channel_id,
                     "authority": signal.authority_score,
                     "priority": priority,
+                    "llm_summary": summary,
                 }
             )
             trigger_store.human_ready.set()

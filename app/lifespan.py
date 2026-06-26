@@ -81,8 +81,10 @@ def _make_executor_factory(router: ModelRouter):
 
     async def executor_factory(job: ResponseJob) -> None:
         import uuid
+        from datetime import datetime
+        import shutil
         event_id = str(job.id)[:8]
-        run_id = f"perception-{event_id}"
+        run_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_perception_{event_id}"
         task_description = job.event.response_context or job.event.summary
 
         # Create run directory for perception jobs
@@ -90,6 +92,14 @@ def _make_executor_factory(router: ModelRouter):
         runs_root = Path("logs") / "runs"
         run_dir = runs_root / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Keep only the 10 most recent runs, sorted by time order
+        try:
+            all_runs = sorted([d for d in runs_root.iterdir() if d.is_dir()], key=lambda d: d.name, reverse=True)
+            for old_run in all_runs[10:]:
+                shutil.rmtree(old_run, ignore_errors=True)
+        except Exception:
+            pass
 
         executor = AgentExecutor(
             router=router,

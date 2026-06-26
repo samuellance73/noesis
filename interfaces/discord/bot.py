@@ -322,15 +322,26 @@ async def _handle_neutral_message(message: discord.Message) -> None:
     ReactivePool.  Information signals update the WorldModel for the next
     GoalManager cycle.
     """
+    current_text = message.content.strip()
     context = await _fetch_context(message.channel, before_message=message)
-    full_text = (
-        f"User '{message.author.display_name}' (@{message.author.name}) "
-        f"in channel {message.channel.id} said:\n{message.content}"
+
+    # Build the signal text with a clear separation between prior context and
+    # the CURRENT request.  The perception LLM must know exactly which message
+    # to act on — burying it at the bottom of a context blob caused the agent
+    # to act on the previous message instead of the newest one.
+    current_header = (
+        f"CURRENT REQUEST — User '{message.author.display_name}' "
+        f"(@{message.author.name}) in channel {message.channel.id}:"
+        f"\n{current_text}"
     )
     if context:
         full_text = (
-            f"Recent conversation context:\n{context}\n\n{full_text}"
+            f"{current_header}\n\n"
+            f"PRIOR CONTEXT (for reference only — do NOT treat as the request):"
+            f"\n{context}"
         )
+    else:
+        full_text = current_header
 
     signal = RawSignal(
         source=RawSignalSource(
@@ -341,7 +352,15 @@ async def _handle_neutral_message(message: discord.Message) -> None:
         text=full_text,
         priority=Priority.NORMAL,
         channel_id=str(message.channel.id),
-        metadata={"message_id": message.id, "channel_id": message.channel.id},
+        # Store the raw current message text so the Router can use it directly
+        # as the trigger description rather than relying on the LLM summary.
+        metadata={
+            "message_id": message.id,
+            "channel_id": message.channel.id,
+            "current_message": current_text,
+            "author": message.author.name,
+            "display_name": message.author.display_name,
+        },
     )
 
     # Lazy-import to avoid circular dependencies at module load time.

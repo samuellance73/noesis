@@ -87,7 +87,7 @@ class TestConfigLoading:
     def test_strong_tier_config(self):
         config = load_config("config/model_router.yaml")
         strong = config.tiers[ModelTier.STRONG]
-        assert strong.context_budget      == 32000
+        assert strong.context_budget      == 64000
         assert strong.max_response_tokens == 4000
         assert strong.temperature         == 0.4
         assert strong.timeout_seconds     == 60.0
@@ -358,7 +358,7 @@ class TestPerTierUpstreamModel:
 
         assert router.budget_for(ModelTier.NANO)     == 3000
         assert router.budget_for(ModelTier.STANDARD) == 8000
-        assert router.budget_for(ModelTier.STRONG)   == 32000
+        assert router.budget_for(ModelTier.STRONG)   == 64000
 
 
 # ── Full round-trip (primary success) ────────────────────────────────────────
