@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from perception.schemas import DeduplicatedSignal, ScoredSignal, SourceType
+from perception.schemas import RawSignal, ScoredSignal, SourceType
 from utils.log_writer import emit
 
 # Base scores per source type — keep in sync with spec §4
@@ -35,9 +35,9 @@ _BASE_SCORES: dict[SourceType, float] = {
 
 _DEFAULT_BASE_SCORE = 0.30
 
-# Frequency bonus cap and per-signal increment
-_FREQ_BONUS_CAP = 0.20
-_FREQ_BONUS_PER_SIGNAL = 0.01
+# Frequency bonus cap and per-signal increment (removed - no dedup)
+# _FREQ_BONUS_CAP = 0.20
+# _FREQ_BONUS_PER_SIGNAL = 0.01
 
 # Recency bonus: signals arriving within this many seconds get a small boost
 _RECENCY_WINDOW_SECONDS = 30.0
@@ -46,7 +46,7 @@ _RECENCY_BONUS_MAX = 0.05
 
 class AuthorityScorer:
     """
-    Scores deduplicated signals and returns ScoredSignal objects ready for the
+    Scores raw signals and returns ScoredSignal objects ready for the
     Synthesizer stage.
 
     Parameters
@@ -59,37 +59,35 @@ class AuthorityScorer:
     def __init__(self, operator_ids: list[str] | None = None) -> None:
         self._operator_ids: frozenset[str] = frozenset(operator_ids or [])
 
-    def score(self, signal: DeduplicatedSignal) -> ScoredSignal:
+    def score(self, signal: RawSignal) -> ScoredSignal:
         """Compute authority score and return a ScoredSignal."""
-        base = self._base_score(signal.representative.source.type)
-        freq_bonus = min(_FREQ_BONUS_CAP, signal.frequency * _FREQ_BONUS_PER_SIGNAL)
-        rec_bonus = self._recency_bonus(signal.representative.timestamp)
-        final = min(1.0, base + freq_bonus + rec_bonus)
+        base = self._base_score(signal.source.type)
+        rec_bonus = self._recency_bonus(signal.timestamp)
+        final = min(1.0, base + rec_bonus)
 
         emit(
             event="perception.scored",
             layer="perception",
             level="debug",
             data={
-                "signal_id": signal.representative.id,
-                "source_type": signal.representative.source.type.value,
+                "signal_id": signal.id,
+                "source_type": signal.source.type.value,
                 "base": base,
-                "freq_bonus": freq_bonus,
                 "rec_bonus": rec_bonus,
                 "score": final,
             }
         )
 
         return ScoredSignal(
-            representative=signal.representative,
-            frequency=signal.frequency,
-            sources=signal.sources,
-            perception_type=signal.perception_type,
+            representative=signal,
+            frequency=1,
+            sources=[signal.source],
+            perception_type=None,
             authority_score=final,
         )
 
     def score_batch(
-        self, signals: list[DeduplicatedSignal]
+        self, signals: list[RawSignal]
     ) -> list[ScoredSignal]:
         return [self.score(s) for s in signals]
 

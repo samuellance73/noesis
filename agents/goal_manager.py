@@ -115,27 +115,36 @@ class GoalManager:
         from datetime import datetime
         import uuid
         import shutil
-        
+
+        # Generate run_id if not provided (e.g., when called directly, not through daemon)
+        run_dir_created_here = False
         if not run_id:
             run_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{str(uuid.uuid4())[:4]}"
-        
+            run_dir_created_here = True
+
         # Clear agent.jsonl is now handled at main.py startup
-        
+
         goal_state = GoalState(ultimate_goal=ultimate_goal)
         goal_state.mission = Mission(statement=ultimate_goal, domain="general")
-        
+
         from pathlib import Path
         runs_root = Path("logs") / "runs"
         run_dir = runs_root / run_id
-        run_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Keep only the 10 most recent runs, sorted by time order
-        try:
-            all_runs = sorted([d for d in runs_root.iterdir() if d.is_dir()], key=lambda d: d.name, reverse=True)
-            for old_run in all_runs[10:]:
-                shutil.rmtree(old_run, ignore_errors=True)
-        except Exception:
-            pass
+
+        # Only create run directory if we generated the run_id (daemon creates it otherwise)
+        if run_dir_created_here:
+            run_dir.mkdir(parents=True, exist_ok=True)
+
+            # Keep only the 10 most recent runs, sorted by time order
+            try:
+                all_runs = sorted([d for d in runs_root.iterdir() if d.is_dir()], key=lambda d: d.name, reverse=True)
+                for old_run in all_runs[10:]:
+                    shutil.rmtree(old_run, ignore_errors=True)
+            except Exception:
+                pass
+        else:
+            # Ensure directory exists even if daemon created it (defensive)
+            run_dir.mkdir(parents=True, exist_ok=True)
         
         # Use injected memory_store or create default EpisodicMemoryAdapter
         if self.memory_store is None:

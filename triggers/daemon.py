@@ -37,6 +37,7 @@ Architecture
 """
 
 import asyncio
+import os
 
 from triggers.store import Trigger, trigger_store
 from triggers.triage import TriageDispatcher
@@ -67,6 +68,25 @@ async def _run_trigger(trigger: Trigger, router: ModelRouter) -> None:
     agent or Fast-Path executor. Stream events to the bus and update trigger
     status when done.
     """
+    from datetime import datetime
+    import uuid
+    from pathlib import Path
+    import shutil
+
+    # Generate run_id and create run directory immediately for all trigger types
+    run_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{str(uuid.uuid4())[:4]}"
+    runs_root = Path("logs") / "runs"
+    run_dir = runs_root / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    # Keep only the 10 most recent runs, sorted by time order
+    try:
+        all_runs = sorted([d for d in runs_root.iterdir() if d.is_dir()], key=lambda d: d.name, reverse=True)
+        for old_run in all_runs[10:]:
+            shutil.rmtree(old_run, ignore_errors=True)
+    except Exception:
+        pass
+
     emit(
         event="daemon.trigger_dispatched",
         layer="daemon",
@@ -74,7 +94,8 @@ async def _run_trigger(trigger: Trigger, router: ModelRouter) -> None:
             "trigger_id": str(trigger.id),
             "source": trigger.source,
             "description": trigger.description[:80],
-        }
+        },
+        run_id=run_id,
     )
 
     # Announce to SSE clients that this trigger is now being processed
@@ -90,26 +111,26 @@ async def _run_trigger(trigger: Trigger, router: ModelRouter) -> None:
         decision = await TriageDispatcher.evaluate(trigger, router)
 
         if decision.can_solve_immediately:
-            await _run_fast_path(trigger, decision)
+            await _run_fast_path(trigger, decision, run_id)
         else:
             # Mutate description with the refined escalation plan before routing
             if decision.escalation_instructions:
                 trigger.description = decision.escalation_instructions
 
             if trigger.source in ("human", "perception", "agent"):
-                await _run_as_goal_manager(trigger, router)
+                await _run_as_goal_manager(trigger, router, run_id)
             else:
-                await _run_as_executor(trigger, router)
+                await _run_as_executor(trigger, router, run_id)
         # ───────────────────────────────────────────────────────────────
 
         trigger_store.mark_done(trigger.id)
-        emit("daemon.trigger_completed", "daemon", {"trigger_id": str(trigger.id)})
+        emit("daemon.trigger_completed", "daemon", {"trigger_id": str(trigger.id)}, run_id=run_id)
         await _update_discord_reaction(trigger, "✅")
 
     except Exception as e:
         error_msg = str(e)
         trigger_store.mark_failed(trigger.id, error=error_msg)
-        emit("daemon.trigger_failed", "daemon", {"trigger_id": str(trigger.id), "error": error_msg}, level="error")
+        emit("daemon.trigger_failed", "daemon", {"trigger_id": str(trigger.id), "error": error_msg}, level="error", run_id=run_id)
         await event_bus.publish({
             "event":      "trigger_failed",
             "trigger_id": str(trigger.id),
@@ -119,7 +140,7 @@ async def _run_trigger(trigger: Trigger, router: ModelRouter) -> None:
 
 
 
-async def _run_fast_path(trigger: Trigger, decision) -> None:
+async def _run_fast_path(trigger: Trigger, decision, run_id: str) -> None:
     """
     Fast-Path: execute 0 or 1 tool call(s) in-process, then publish the
     concatenated result as a final_answer event.  GoalManager is bypassed.
@@ -137,6 +158,7 @@ async def _run_fast_path(trigger: Trigger, decision) -> None:
                 "tool": tool_call.tool_name,
                 "input": str(tool_call.tool_input)[:120],
             },
+            run_id=run_id,
         )
         result = await tools_registry.execute(tool_call.tool_name, tool_call.tool_input)
         output_parts.append(result)
@@ -159,10 +181,11 @@ async def _run_fast_path(trigger: Trigger, decision) -> None:
         "daemon.fast_path_complete",
         "daemon",
         {"trigger_id": str(trigger.id), "answer_len": len(final_text)},
+        run_id=run_id,
     )
 
 
-async def _run_as_goal_manager(trigger: Trigger, router: ModelRouter) -> None:
+async def _run_as_goal_manager(trigger: Trigger, router: ModelRouter, run_id: str) -> None:
     """
     Human-operator path: full GoalManager loop with sub-task decomposition,
     multi-cycle reasoning, and human-readable run logs under logs/runs/.
@@ -172,14 +195,14 @@ async def _run_as_goal_manager(trigger: Trigger, router: ModelRouter) -> None:
         max_cycles=_DAEMON_MAX_CYCLES,
         cycle_interval_seconds=_DAEMON_CYCLE_INTERVAL,
     )
-    async for event in manager.run_stream(trigger.description):
+    async for event in manager.run_stream(trigger.description, run_id=run_id):
         event["trigger_id"]       = str(trigger.id)
         event["trigger_source"]   = trigger.source
         event["trigger_metadata"] = trigger.metadata or {}
         await event_bus.publish(event)
 
 
-async def _run_as_executor(trigger: Trigger, router: ModelRouter) -> None:
+async def _run_as_executor(trigger: Trigger, router: ModelRouter, run_id: str) -> None:
     """
     Non-human path: lightweight single-turn AgentExecutor — no multi-cycle
     overhead, no run logs written to disk.
@@ -224,9 +247,10 @@ async def _process_batch(router: ModelRouter) -> None:
     pending = trigger_store.get_pending()
     if not pending:
         # Store is idle — give the self-initiative engine a chance to act
-        submitted = await _self_initiative.maybe_submit(router)
-        if submitted:
-            emit("daemon.self_initiative_triggered", "daemon", {})
+        if os.getenv("SELF_INITIATIVE_ENABLED", "true").lower() == "true":
+            submitted = await _self_initiative.maybe_submit(router)
+            if submitted:
+                emit("daemon.self_initiative_triggered", "daemon", {})
         return
     emit("daemon.batch_processing", "daemon", {"count": len(pending)})
     await asyncio.gather(*[_run_trigger(t, router) for t in pending])

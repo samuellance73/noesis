@@ -20,11 +20,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class PerceptionConfig(BaseSettings):
     # ── Intake buffer ──────────────────────────────────────────────────────────
-    intake_window_seconds: float = 5.0
+    intake_window_seconds: float = 60.0
     intake_max_buffer_size: int = 100
-
-    # ── Deduplication ─────────────────────────────────────────────────────────
-    similarity_threshold: float = 0.85
 
     # ── Authority scoring ──────────────────────────────────────────────────────
     # Loaded from env — never elevatable by message content.

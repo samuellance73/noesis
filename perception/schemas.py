@@ -6,10 +6,6 @@ All Pydantic data models used by the perception layer.
 Signal lifecycle
 ────────────────
   RawSignal
-    → (Deduplicator) →
-  DeduplicatedSignal          (adds frequency, merged sources)
-    → (Classifier) →
-  DeduplicatedSignal.perception_type set
     → (AuthorityScorer) →
   ScoredSignal                (final pre-synthesis view)
     → (Synthesizer) →
@@ -65,18 +61,6 @@ class RawSignal(BaseModel):
     metadata: dict = Field(default_factory=dict)
 
 
-# ─── Post-deduplication ───────────────────────────────────────────────────────
-
-class DeduplicatedSignal(BaseModel):
-    representative: RawSignal        # most-recent signal in the cluster
-    frequency: int = 1               # how many raw signals were collapsed
-    sources: list[RawSignalSource]   # all contributing sources
-    raw_signals: list[RawSignal] = Field(default_factory=list)
-    # Set by Classifier and AuthorityScorer in subsequent stages:
-    perception_type: "PerceptionType | None" = None
-    authority_score: float | None = None
-
-
 # ─── Perception type ──────────────────────────────────────────────────────────
 
 class PerceptionType(str, Enum):
@@ -92,13 +76,13 @@ class PerceptionType(str, Enum):
 
 class ScoredSignal(BaseModel):
     """
-    A deduplicated signal after authority scoring.
+    A raw signal after authority scoring.
     This is the input type for the LLM bundle processing.
     """
     id: UUID = Field(default_factory=uuid4)
     representative: RawSignal
-    frequency: int
-    sources: list[RawSignalSource]
+    frequency: int = 1
+    sources: list[RawSignalSource] = Field(default_factory=list)
     perception_type: PerceptionType | None = None
     authority_score: float
 

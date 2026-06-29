@@ -6,12 +6,11 @@ PerceptionLayer — top-level orchestrator wiring all pipeline stages.
 Architecture (updated)
 ──────────────────────
   while True:
-      batch = await intake_buffer.drain()          # blocks until window/flush/threshold
+      batch = await intake_buffer.drain()          # blocks until 3 messages or 60s
       if not batch: continue
-      deduped = deduplicator.deduplicate(batch)    # Stage 2
-      scored  = authority_scorer.score_batch(deduped)  # Stage 3
-      decision = await TriageDispatcher.evaluate_batch(scored, router)  # Stage 4
-      await _execute_batch_decision(scored, decision)  # Stage 5
+      scored  = authority_scorer.score_batch(batch)  # Stage 2
+      decision = await TriageDispatcher.evaluate_batch(scored, router)  # Stage 3
+      await _execute_batch_decision(scored, decision)  # Stage 4
           ├─ fast_path_actions   → asyncio.gather (concurrent tool calls + Discord reply)
           └─ slow_path_escalations → trigger_store.submit(source="perception")
 
@@ -35,15 +34,12 @@ from perception.reactive_pool import ReactivePool
 from perception.dispatcher import BatchActionDispatcher
 from utils.prompts import load_prompt
 from perception.schemas import (
-    DeduplicatedSignal,
     PerceptionWorldModel,
     RawSignal,
     ScoredSignal,
 )
 from perception.stages.authority import AuthorityScorer
-from perception.stages.dedup import Deduplicator
 from perception.stages.intake import IntakeBuffer
-from perception.stages.router import Router
 from core.model_router import ModelRouter, ModelRequest, ModelTier
 from triggers.triage import BatchTriageDecision, FastPathAction, SlowPathEscalation, TriageDispatcher
 from utils.log_writer import emit
@@ -85,15 +81,9 @@ class PerceptionLayer:
         # ── Stage 1: Intake buffer ─────────────────────────────────────────────
         self._intake = IntakeBuffer(
             window_seconds=config.intake_window_seconds,
-            max_size=config.intake_max_buffer_size,
         )
 
-        # ── Stage 2: Deduplicator ──────────────────────────────────────────────
-        self._dedup = Deduplicator(
-            similarity_threshold=config.similarity_threshold,
-        )
-
-        # ── Stage 3: Authority scorer ──────────────────────────────────────────
+        # ── Stage 2: Authority scorer ──────────────────────────────────────────
         self._authority = AuthorityScorer(
             operator_ids=config.operator_ids,
         )
@@ -110,12 +100,6 @@ class PerceptionLayer:
 
         # ── WorldModel facade ──────────────────────────────────────────────────
         self._world_model: PerceptionWorldModel = world_model or PerceptionWorldModel()
-
-        # ── Stage 5: Router ────────────────────────────────────────────────────
-        self._router = Router(
-            world_model=self._world_model,
-            reactive_pool=self._reactive_pool,
-        )
 
         self._loop_task: asyncio.Task | None = None
         self._running = False
@@ -205,7 +189,7 @@ class PerceptionLayer:
         emit("perception.loop_exited", "perception", {}, level="debug")
 
     async def _run_pipeline(self, batch: list[RawSignal]) -> None:
-        """Process one batch through the 3-stage pipeline with per-stage error isolation."""
+        """Process one batch through the pipeline with per-stage error isolation."""
         raw_count = len(batch)
         emit(
             event="perception.batch_received",
@@ -216,48 +200,23 @@ class PerceptionLayer:
             }
         )
 
-        # ── Stage 2: Deduplication ─────────────────────────────────────────────
+        # ── Stage 2: Authority scoring ─────────────────────────────────────────
         try:
-            deduped: list[DeduplicatedSignal] = self._dedup.deduplicate(batch)
-        except Exception as exc:
-            emit("perception.error", "perception", {"msg": f"Deduplicator crashed: {exc}"}, level="error")
-            # Fallback: treat each raw signal as its own deduplicated signal
-            deduped = [
-                DeduplicatedSignal(
-                    representative=s,
-                    frequency=1,
-                    sources=[s.source],
-                    raw_signals=[s],
-                )
-                for s in batch
-            ]
-
-        emit(
-            event="perception.deduped",
-            layer="perception",
-            data={
-                "count": len(deduped),
-                "collapsed": raw_count - len(deduped),
-            }
-        )
-
-        # ── Stage 3: Authority scoring ─────────────────────────────────────────
-        try:
-            scored = self._authority.score_batch(deduped)
+            scored = self._authority.score_batch(batch)
         except Exception as exc:
             emit("perception.error", "perception", {"msg": f"AuthorityScorer crashed: {exc}"}, level="error")
             scored = [
                 ScoredSignal(
-                    representative=ds.representative,
-                    frequency=ds.frequency,
-                    sources=ds.sources,
+                    representative=s,
+                    frequency=1,
+                    sources=[s.source],
                     perception_type=None,
                     authority_score=0.5,
                 )
-                for ds in deduped
+                for s in batch
             ]
 
-        # ── Stage 4+5: Batch Triage → Concurrent Execution ────────────────────
+        # ── Stage 3+4: Batch Triage → Concurrent Execution ────────────────────
         try:
             decision = await TriageDispatcher.evaluate_batch(scored, self._router_llm)
         except Exception as exc:

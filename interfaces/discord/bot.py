@@ -369,7 +369,7 @@ async def _handle_neutral_message(message: discord.Message) -> None:
     which batches it through IntakeBuffer (subject to the ≥3 OR HIGH threshold)
     before the pipeline processes it.
 
-    Flow: ingest → deduplicate → classify → authority score → synthesize → route
+    Flow: ingest → classify → authority score → synthesize → route
     Queries/directives may eventually trigger an AgentExecutor response via the
     ReactivePool if they clear the perception pipeline.  Information signals
     update the WorldModel for the next GoalManager cycle.
