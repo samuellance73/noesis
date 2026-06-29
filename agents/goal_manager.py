@@ -35,13 +35,13 @@ from typing import Any, AsyncGenerator
 
 from utils.json_parser import parse_llm_json
 from utils.log_writer import emit
+from utils.prompts import load_prompt
 
 from core.model_router import ModelRouter, ModelRequest, ModelTier
 from .executor import AgentExecutor
 from .schemas import GoalState, ManagerDecision, SubTask, Mission, Objective
 from .tools import build_specialized_registry
-from agents.memory.episodic_store import EpisodicStore
-from agents.memory.episodic_writer import EpisodicWriter
+from agents.memory.base import MemoryStore, EpisodicMemoryAdapter
 from agents.critic import score_result
 
 # Safety cap — even a fully autonomous agent shouldn't run forever.
@@ -54,81 +54,8 @@ _CYCLE_TIMEOUT_SECONDS = 120
 _STOP_COMMANDS = frozenset({"stop", "halt", "quit", "exit", "q", "abort"})
 
 # ── System prompt ─────────────────────────────────────────────────────────────
-# Kept here as a module-level constant so it can be easily found and edited
-# without touching any logic. Move to a prompts/ directory if it grows further.
-
-_MANAGER_SYSTEM_PROMPT = """\
-You are the strategic Goal Manager of an autonomous AI agent. \
-You oversee the pursuit of the user's permanent Mission across multiple \
-autonomous cycles. Each cycle you decide what to do next.
-
-Your job is NOT to answer the user directly — you delegate work to specialized \
-Executor agents and synthesize their results.
-
-IMPORTANT: Your Executor agents already have access to a Python environment with \
-`PyGithub`, `requests`, and environment variables like `GITHUB_TOKEN` and \
-`TELEGRAM_BOT_TOKEN` pre-loaded. Do NOT ask the user for these tokens; your \
-agents can already use them.
-
-GOAL HIERARCHY:
-1. Mission: The permanent overarching directive of this run. You CANNOT mutate it.
-2. Objectives: Medium-term milestones derived from the Mission. You should define/track these.
-You must maintain the list of Objectives, marking them "active", "complete", or "deferred", or adding new ones.
-
-USER OVERRIDES:
-Any new user instructions or permissions provided in the Mission, Ultimate Goal, or New User Input STRICTLY OVERRIDE any prior beliefs, assumed policies, or domain map constraints. If the user explicitly grants permission to perform an action (e.g., deleting a repository), you MUST follow it and disregard any previous beliefs that the action was prohibited.
-
-EXECUTOR SPECIALIZATION:
-When spawning sub-tasks in `tasks_to_spawn`, you must select the most appropriate `executor_type`:
-- "research" : access to `web_search` only (information gathering).
-- "code"     : access to `python_execute` and `run_command` (computation/scripting).
-- "synthesis": no tools (pure reasoning or text generation from context).
-- "full"      : access to ALL registered tools, including `send_discord_message`.
-
-CRITICAL TOOL ROUTING RULES:
-- To send a Discord message, ALWAYS use executor_type="full" and instruct it to use the `send_discord_message` tool.
-  The tool accepts a JSON string: {"channel_id": <int>, "message": "<text>"}
-  This routes through the live selfbot connection and is the ONLY reliable way to send messages.
-  Do NOT spawn a "code" executor to call the Discord REST API directly — the token auth is complex and error-prone.
-
-You will receive the current goal state (which contains the Mission, Objectives, and a structured World Model) \
-and any new user messages. You must output a single valid JSON object matching this schema:
-
-{
-  "thought": "Your internal reasoning about where the goal stands and what's needed next.",
-  "tasks_to_spawn": [
-    {
-      "goal": "Specific sub-task goal",
-      "context": "What the executor needs to know",
-      "executor_type": "research" | "code" | "synthesis" | "full"
-    }
-  ],
-  "progress_update": "A concise status message to show the user (1-2 sentences).",
-  "world_model_patch": {
-    "gaps_closed": ["list of gap strings closed this cycle"],
-    "gaps_added": ["list of new gaps/unknowns discovered this cycle"],
-    "domain_updates": {"topic": "description of what we updated/learned about this topic"},
-    "belief_updates": {"belief claim": 0.9}
-  },
-  "updated_objectives": [
-    {
-      "id": "obj-1",
-      "description": "milestone description",
-      "status": "active" | "complete" | "deferred",
-      "spawned_cycle": 1
-    }
-  ],
-  "updated_open_questions": ["question1", "question2"] or null to keep unchanged,
-  "is_goal_complete": false,
-  "final_answer": null
-}
-
-Rules:
-1. If you need more information, populate tasks_to_spawn. You can spawn multiple at once — they run in PARALLEL.
-2. If you have enough information to complete the goal, set is_goal_complete to true and write final_answer.
-3. If goal is complete, tasks_to_spawn must be empty.
-4. Respond ONLY with valid JSON. No text outside the JSON block.
-"""
+# Loaded from prompts/manager_system.txt for easier editing and version control
+_MANAGER_SYSTEM_PROMPT = load_prompt("manager_system.txt")
 
 
 def _parse_manager_decision(raw: str) -> ManagerDecision:
@@ -154,10 +81,12 @@ class GoalManager:
     def __init__(
         self,
         router: ModelRouter,
+        memory_store: MemoryStore | None = None,
         max_cycles: int = _MAX_CYCLES,
         cycle_interval_seconds: float | None = None,
     ):
         self.router                     = router
+        self.memory_store               = memory_store
         self.max_cycles                 = max_cycles
         self.cycle_interval_seconds     = cycle_interval_seconds  # min wall-time per cycle
         self._stop_event                = asyncio.Event()
@@ -208,11 +137,16 @@ class GoalManager:
         except Exception:
             pass
         
-        episodic_store = EpisodicStore()
-        episodic_writer = EpisodicWriter(run_dir)
+        # Use injected memory_store or create default EpisodicMemoryAdapter
+        if self.memory_store is None:
+            self.memory_store = EpisodicMemoryAdapter(runs_root=str(runs_root))
+        
+        # If using EpisodicMemoryAdapter, set the run_dir for writing
+        if isinstance(self.memory_store, EpisodicMemoryAdapter):
+            self.memory_store.set_run_dir(run_dir)
 
-        # Working memory priming from Episodic memory
-        prior_runs = episodic_store.load_relevant(ultimate_goal, limit=3)
+        # Working memory priming from memory
+        prior_runs = self.memory_store.load_relevant(ultimate_goal, limit=3)
         if prior_runs:
             for run in prior_runs:
                 topic = f"Prior Knowledge (Run ID {run.run_id[:8]})"
@@ -270,16 +204,18 @@ class GoalManager:
             # ── 4. Apply manager's state updates ─────────────────────────
             self._apply_state_updates(decision, goal_state, cycle)
 
-            # Write run summary to episodic memory (intermediate cycle update)
-            episodic_writer.write_summary(
+            # Write run summary to memory (intermediate cycle update)
+            self.memory_store.write_summary(
                 run_id=run_id,
-                goal=ultimate_goal,
-                cycle_summaries=goal_state.world_model.cycle_summaries,
-                completed_tasks=[{"goal": ct.goal, "answer": ct.answer} for ct in goal_state.completed],
-                final_answer=decision.final_answer if decision.is_goal_complete else None,
-                is_complete=goal_state.is_complete,
-                domain_map=goal_state.world_model.domain_map,
-                beliefs=goal_state.world_model.beliefs
+                data={
+                    "goal": ultimate_goal,
+                    "cycle_summaries": goal_state.world_model.cycle_summaries,
+                    "completed_tasks": [{"goal": ct.goal, "answer": ct.answer} for ct in goal_state.completed],
+                    "final_answer": decision.final_answer if decision.is_goal_complete else None,
+                    "is_complete": goal_state.is_complete,
+                    "domain_map": goal_state.world_model.domain_map,
+                    "beliefs": goal_state.world_model.beliefs
+                }
             )
 
             # ── 5. Stream progress to caller ──────────────────────────────
@@ -315,16 +251,18 @@ class GoalManager:
                 final = decision.final_answer or decision.progress_update
                 emit("strategic.final_answer", "strategic", {"answer": final, "cycles": cycle, "tasks": len(goal_state.completed)}, run_id=run_id)
                 
-                # Write final run summary to episodic memory
-                episodic_writer.write_summary(
+                # Write final run summary to memory
+                self.memory_store.write_summary(
                     run_id=run_id,
-                    goal=ultimate_goal,
-                    cycle_summaries=goal_state.world_model.cycle_summaries,
-                    completed_tasks=[{"goal": ct.goal, "answer": ct.answer} for ct in goal_state.completed],
-                    final_answer=final,
-                    is_complete=True,
-                    domain_map=goal_state.world_model.domain_map,
-                    beliefs=goal_state.world_model.beliefs
+                    data={
+                        "goal": ultimate_goal,
+                        "cycle_summaries": goal_state.world_model.cycle_summaries,
+                        "completed_tasks": [{"goal": ct.goal, "answer": ct.answer} for ct in goal_state.completed],
+                        "final_answer": final,
+                        "is_complete": True,
+                        "domain_map": goal_state.world_model.domain_map,
+                        "beliefs": goal_state.world_model.beliefs
+                    }
                 )
                 
                 yield {
