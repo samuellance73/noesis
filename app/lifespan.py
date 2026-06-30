@@ -7,6 +7,7 @@ long-running background components:
   • HTTP connection pool (httpx)
   • Unified daemon (feeder + processing + self-initiative tasks)
   • Discord selfbot (optional, gated on DISCORD_BOT_TOKEN)
+  • Reddit poller  (optional, gated on REDDIT_CLIENT_ID)
 
 Design note — ownership of IntakeBuffer / PerceptionLayer
 ──────────────────────────────────────────────────────────
@@ -84,11 +85,16 @@ async def lifespan(app: FastAPI):
         # ── Discord bot (optional) ────────────────────────────────────────
         discord_task = await _start_discord(app)
 
+        # ── Reddit poller (optional) ─────────────────────────────────────
+        reddit_task = await _start_reddit(app)
+
         yield
 
         # ── Shutdown ──────────────────────────────────────────────────────
         await _cancel(daemon_task)
         await _stop_discord(discord_task)
+        if reddit_task:
+            await _cancel(reddit_task)
 
 
 def _dummy_intake_buffer():
@@ -199,6 +205,34 @@ async def _stop_discord(task: "asyncio.Task | None") -> None:
     from interfaces.discord.bot import bot as discord_bot
     await discord_bot.close()
     await _cancel(task)
+
+
+async def _start_reddit(app: FastAPI) -> "asyncio.Task | None":
+    """Start the Reddit poller task if credentials are configured."""
+    from integrations.reddit.config import RedditConfig
+    from integrations.reddit.poller import run_reddit_poller
+
+    config = RedditConfig()
+    if not config.enabled:
+        emit(
+            "system.warning",
+            "system",
+            {"msg": "Reddit credentials not set — Reddit interface disabled."},
+            level="warn",
+        )
+        return None
+
+    if "PYTEST_CURRENT_TEST" in os.environ:
+        emit("system.warning", "system",
+             {"msg": "Reddit poller disabled (PYTEST running)."}, level="warn")
+        return None
+
+    task = asyncio.create_task(
+        run_reddit_poller(config, app.state.perception),
+        name="noesis-reddit",
+    )
+    app.state.reddit_task = task
+    return task
 
 
 async def _cancel(task: asyncio.Task) -> None:

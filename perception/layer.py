@@ -26,24 +26,19 @@ halts the pipeline loop.
 from __future__ import annotations
 
 import asyncio
-import json
-import os
 
 from perception.config import PerceptionConfig
 from perception.reactive_pool import ReactivePool
 from perception.dispatcher import BatchActionDispatcher
-from utils.prompts import load_prompt
 from perception.schemas import (
     PerceptionWorldModel,
     ScoredSignal,
 )
 from perception.stages.authority import AuthorityScorer
 from perception.stages.intake import IntakeBuffer
-from datetime import datetime
-from core.model_router import ModelRouter, ModelRequest, ModelTier
+from core.model_router import ModelRouter, ModelTier
 from triggers.triage import BatchTriageDecision, FastPathAction, SlowPathEscalation, TriageDispatcher
 from utils.log_writer import emit
-from utils.json_parser import _clean_llm_json
 
 from core.events import UnifiedIngestEvent
 from core.queues import ingest_queue
@@ -121,13 +116,7 @@ class PerceptionLayer:
             }
         )
 
-    async def start(self) -> None:
-        """Placeholder for compatibility. ReactivePool started by daemon."""
-        emit("perception.started", "perception", {"msg": "PerceptionLayer initialized, awaiting daemon start."})
 
-    async def stop(self) -> None:
-        """Placeholder for compatibility. ReactivePool stopped by daemon."""
-        emit("perception.stopped", "perception", {"msg": "PerceptionLayer stopped, assuming daemon handles ReactivePool shutdown."})
 
     @property
     def world_model(self) -> PerceptionWorldModel:
@@ -180,78 +169,3 @@ class PerceptionLayer:
         # Hand off execution to the dispatcher
         await BatchActionDispatcher.dispatch(scored, decision, self._world_model, self._router_llm)
 
-    async def _process_bundle(self, signals: list[ScoredSignal]) -> list[dict]:
-        """
-        Process a bundle of signals through a single LLM call.
-        Returns a list of decision dicts with keys: index, priority, action, summary, reason.
-        """
-        import json
-        import time
-
-        # Build the signal block for the prompt
-        signal_block_lines = []
-        for i, signal in enumerate(signals):
-            timestamp = int(signal.representative.monotonic_timestamp)
-            source = signal.representative.sender_identifier
-            channel = signal.representative.target_conversation_identifier or "unknown"
-            authority = signal.authority_score
-            text = signal.representative.raw_content
-
-            signal_block_lines.append(
-                f"[{i}] source={source} channel={channel} authority={authority:.2f} time={timestamp}\n"
-                f'    "{text}"'
-            )
-
-        signal_block = "\n\n".join(signal_block_lines)
-
-        system_prompt = load_prompt("triage_batch_system.txt")
-
-        user_prompt = f"""\
-SIGNALS:
-{signal_block}
-"""
-
-        request = ModelRequest(
-            tier=ModelTier.NANO,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            component="PerceptionLayer._process_bundle",
-        )
-
-        response = await self._router_llm.complete(request)
-        raw_content = response.content
-
-        if not raw_content:
-            emit("perception.warning", "perception", {"msg": "LLM returned empty content."}, level="warn")
-            raise ValueError("Empty LLM response")
-
-        # Parse the JSON response
-        try:
-            cleaned = _clean_llm_json(raw_content)
-            data = json.loads(cleaned)
-
-            if not isinstance(data, list):
-                data = [data]
-
-            # Validate basic structure
-            for item in data:
-                if not isinstance(item, dict):
-                    raise ValueError("Decision item is not a dict")
-                if "index" not in item or "action" not in item:
-                    raise ValueError("Decision item missing required fields")
-
-            return data
-
-        except (json.JSONDecodeError, ValueError) as parse_err:
-            emit(
-                event="perception.warning",
-                layer="perception",
-                level="warn",
-                data={
-                    "msg": f"JSON parse failed ({parse_err})",
-                    "raw_response": raw_content[:500],
-                }
-            )
-            raise

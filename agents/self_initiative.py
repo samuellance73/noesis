@@ -36,6 +36,9 @@ from core.queues import ingest_queue
 from perception.stages.intake import IntakeBuffer
 from utils.log_writer import emit
 
+# Feature switch — set SELF_INITIATIVE_ENABLED=true in .env to enable.
+_ENABLED: bool = os.getenv("SELF_INITIATIVE_ENABLED", "false").strip().lower() in ("1", "true", "yes")
+
 # Minimum seconds between self-initiative submissions to prevent spam.
 _COOLDOWN_SECONDS: float = float(os.getenv("SELF_INITIATIVE_COOLDOWN", "300"))
 
@@ -53,9 +56,9 @@ class SelfInitiativeEngine:
     """
     Generates autonomous goals when the agent has nothing to do.
 
-    Usage (inside triggers/daemon.py):
+    Usage (inside core/daemon.py):
         engine = SelfInitiativeEngine()
-        await engine.maybe_submit(router)
+        submitted = await engine.run(router, intake_buffer)
     """
 
     def __init__(self) -> None:
@@ -64,11 +67,15 @@ class SelfInitiativeEngine:
 
     async def run(self, router: ModelRouter, intake_buffer: IntakeBuffer) -> bool:
         """
-        If the cooldown has elapsed and the system is idle, generate and
-        submit a new self-initiative goal.
+        If self-initiative is enabled, the cooldown has elapsed, and the system
+        is idle, generate and submit a new self-initiative goal.
 
+        Toggle via SELF_INITIATIVE_ENABLED=true|false in .env (default: false).
         Returns True if a new goal was submitted, False otherwise.
         """
+        if not _ENABLED:
+            return False
+
         async with self._lock:
             if time.monotonic() - self._last_submission < _COOLDOWN_SECONDS:
                 return False
@@ -154,8 +161,17 @@ class SelfInitiativeEngine:
             log_path = _LOG_PATH
             if not log_path.exists():
                 return "(no log file found)"
-            lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
-            recent = lines[-_MAX_LOG_LINES:]
-            return "\n".join(recent) if recent else "(log is empty)"
+            
+            # Read efficiently from the end of the file to avoid loading huge logs into memory
+            with open(log_path, "rb") as f:
+                f.seek(0, 2)
+                file_size = f.tell()
+                # Guess that 60 lines is at most ~16KB
+                buffer_size = min(file_size, 16384)
+                f.seek(-buffer_size, 2)
+                chunk = f.read().decode("utf-8", errors="replace")
+                lines = chunk.splitlines()
+                recent = lines[-_MAX_LOG_LINES:]
+                return "\n".join(recent) if recent else "(log is empty)"
         except Exception as exc:
             return f"(could not read log: {exc})"

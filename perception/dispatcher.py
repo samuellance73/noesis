@@ -137,15 +137,32 @@ class BatchActionDispatcher:
         if tool_output:
             reply = f"{reply}\n\n**Output:**\n{tool_output}" if reply else tool_output
 
-        if channel_id and reply:
-            try:
-                await ServiceRegistry.call(
-                    "send_discord_message",
-                    json.dumps({"channel_id": int(channel_id), "message": reply}),
-                )
-            except Exception as exc:
-                emit("perception.warning", "perception",
-                     {"msg": f"Fast-path Discord send failed: {exc}"}, level="warn")
+        if reply:
+            source_channel = sig.representative.source_channel
+            reddit_item_id = meta.get("reddit_item_id")
+            
+            if source_channel.startswith("reddit") or reddit_item_id:
+                if reddit_item_id:
+                    try:
+                        await ServiceRegistry.call(
+                            "send_reddit_reply",
+                            item_id=reddit_item_id,
+                            item_type=meta.get("reddit_item_type", "comment"),
+                            body=reply,
+                        )
+                    except Exception as exc:
+                        emit("perception.warning", "perception",
+                             {"msg": f"Fast-path Reddit reply failed: {exc}"}, level="warn")
+            else:
+                if channel_id:
+                    try:
+                        await ServiceRegistry.call(
+                            "send_discord_message",
+                            json.dumps({"channel_id": int(channel_id), "message": reply}),
+                        )
+                    except Exception as exc:
+                        emit("perception.warning", "perception",
+                             {"msg": f"Fast-path Discord send failed: {exc}"}, level="warn")
 
         emit("perception.fast_path_done", "perception",
              {"index": idx, "channel": channel_id, "reply_len": len(reply or "")})

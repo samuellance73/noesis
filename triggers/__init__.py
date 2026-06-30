@@ -1,13 +1,12 @@
-# triggers — trigger queue, persistence, background daemon, and triage middleware
+# triggers — triage middleware for the perception pipeline
 from .triage import (
     TriageDispatcher,
-    TriageDecision,
     BatchTriageDecision,
     FastPathAction,
     SlowPathEscalation,
 )
 
 __all__ = [
-    "TriageDispatcher", "TriageDecision",
+    "TriageDispatcher",
     "BatchTriageDecision", "FastPathAction", "SlowPathEscalation",
 ]

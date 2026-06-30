@@ -14,6 +14,7 @@ from .discord import send_discord_message
 from .python_execute import python_execute
 from .run_command import run_command
 from .web_search import web_search
+from .reddit import send_reddit_reply, create_reddit_post, fetch_reddit_posts
 
 __all__ = [
     "ToolRegistry",
@@ -23,4 +24,8 @@ __all__ = [
     "python_execute",
     "run_command",
     "web_search",
+    "send_reddit_reply",
+    "create_reddit_post",
+    "fetch_reddit_posts",
 ]
+
