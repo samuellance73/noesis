@@ -460,7 +460,7 @@ async def _listen_to_event_bus() -> None:
             event = await q.get()
 
             # Forward events for operator, discord-sourced, and agent-sourced triggers.
-            if event.get("trigger_source") not in ("human", "executor", "discord", "agent"):
+            if event.get("trigger_source") not in ("human", "executor", "discord", "agent", "perception"):
                 continue
 
             metadata = event.get("trigger_metadata", {})

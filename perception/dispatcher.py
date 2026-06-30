@@ -84,9 +84,16 @@ class BatchActionDispatcher:
             # GoalManager's EpisodicMemoryAdapter creates it lazily on first write.
             run_id = str(uuid.uuid4())
 
+            metadata = sig.representative.metadata or {}
+            if "channel_id" not in metadata:
+                try:
+                    metadata["channel_id"] = int(sig.representative.target_conversation_identifier)
+                except ValueError:
+                    metadata["channel_id"] = sig.representative.target_conversation_identifier
+
             goal_manager = GoalManager(router=router)
             asyncio.create_task(
-                BatchActionDispatcher._run_goal_manager(goal_manager, esc.refined_goal, run_id),
+                BatchActionDispatcher._run_goal_manager(goal_manager, esc.refined_goal, run_id, metadata),
                 name=f"goal-manager-{run_id[:8]}",
             )
 
@@ -144,7 +151,7 @@ class BatchActionDispatcher:
              {"index": idx, "channel": channel_id, "reply_len": len(reply or "")})
 
     @staticmethod
-    async def _run_goal_manager(manager: GoalManager, goal: str, run_id: str) -> None:
+    async def _run_goal_manager(manager: GoalManager, goal: str, run_id: str, metadata: dict) -> None:
         """
         Drive a GoalManager to completion and absorb all streamed events.
         Errors are caught and logged; they must not crash the task silently.
@@ -153,6 +160,9 @@ class BatchActionDispatcher:
             async for event in manager.run_stream(goal, run_id=run_id):
                 # Publish to the event bus so SSE clients / Discord bot see progress
                 from utils.event_bus import event_bus
+                # FIXED: Injected source and metadata so bot.py routes events back to Discord
+                event["trigger_source"] = "perception"
+                event["trigger_metadata"] = metadata
                 await event_bus.publish(event)
         except Exception as exc:
             emit("perception.error", "perception",
