@@ -19,18 +19,16 @@ from env).  A message claiming to be from an operator is NOT an operator message
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-
-from perception.schemas import RawSignal, ScoredSignal, SourceType
+from core.events import UnifiedIngestEvent, SenderClass, PriorityLevel
+from perception.schemas import ScoredSignal
 from utils.log_writer import emit
 
 # Base scores per source type — keep in sync with spec §4
-_BASE_SCORES: dict[SourceType, float] = {
-    SourceType.OPERATOR:  1.00,
-    SourceType.TRUSTED:   0.75,
-    SourceType.USER:      0.50,
-    SourceType.ANONYMOUS: 0.20,
-    SourceType.AGENT:     0.60,
+_BASE_SCORES: dict[SenderClass, float] = {
+    SenderClass.OPERATOR:  1.00,
+    SenderClass.TRUSTED:   0.75,
+    SenderClass.EXTERNAL:  0.50, # Corresponds to old SourceType.USER
+    # No direct mapping for ANONYMOUS or AGENT, use EXTERNAL for now or define new SenderClasses
 }
 
 _DEFAULT_BASE_SCORE = 0.30
@@ -59,10 +57,10 @@ class AuthorityScorer:
     def __init__(self, operator_ids: list[str] | None = None) -> None:
         self._operator_ids: frozenset[str] = frozenset(operator_ids or [])
 
-    def score(self, signal: RawSignal) -> ScoredSignal:
+    def score(self, event: UnifiedIngestEvent) -> ScoredSignal:
         """Compute authority score and return a ScoredSignal."""
-        base = self._base_score(signal.source.type)
-        rec_bonus = self._recency_bonus(signal.timestamp)
+        base = self._base_score(event.sender_class)
+        rec_bonus = self._recency_bonus(event.monotonic_timestamp)
         final = min(1.0, base + rec_bonus)
 
         emit(
@@ -70,8 +68,8 @@ class AuthorityScorer:
             layer="perception",
             level="debug",
             data={
-                "signal_id": signal.id,
-                "source_type": signal.source.type.value,
+                "event_identifier": event.event_identifier,
+                "sender_class": event.sender_class.value,
                 "base": base,
                 "rec_bonus": rec_bonus,
                 "score": final,
@@ -79,40 +77,36 @@ class AuthorityScorer:
         )
 
         return ScoredSignal(
-            representative=signal,
+            representative=event,
             frequency=1,
-            sources=[signal.source],
             perception_type=None,
             authority_score=final,
         )
 
     def score_batch(
-        self, signals: list[RawSignal]
+        self, events: list[UnifiedIngestEvent]
     ) -> list[ScoredSignal]:
-        return [self.score(s) for s in signals]
+        return [self.score(e) for e in events]
 
     # ── Private helpers ───────────────────────────────────────────────────────
 
-    def _base_score(self, source_type: SourceType) -> float:
-        return _BASE_SCORES.get(source_type, _DEFAULT_BASE_SCORE)
+    def _base_score(self, sender_class: SenderClass) -> float:
+        return _BASE_SCORES.get(sender_class, _DEFAULT_BASE_SCORE)
 
-    def _recency_bonus(self, timestamp: datetime) -> float:
+    def _recency_bonus(self, event_monotonic_ts: float) -> float:
         """
-        Give a small bonus to very recent signals.  Uses UTC-aware comparison
-        when the timestamp is timezone-aware, falls back to naive UTC otherwise.
-        """
-        now = datetime.now(timezone.utc)
-        # Make naive timestamps comparable by assuming UTC
-        ts = timestamp
-        if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
+        Give a small bonus to very recent signals.
 
-        age_seconds = (now - ts).total_seconds()
+        Both event.monotonic_timestamp and time.monotonic() use the same
+        monotonic clock (no timezone, no epoch), so subtraction gives the
+        true elapsed seconds since the event was created.
+        """
+        import time
+        age_seconds = time.monotonic() - event_monotonic_ts
         if age_seconds < 0:
             age_seconds = 0.0
 
         if age_seconds <= _RECENCY_WINDOW_SECONDS:
-            # Linear decay: newest → full bonus, at window boundary → 0
             fraction = 1.0 - (age_seconds / _RECENCY_WINDOW_SECONDS)
             return _RECENCY_BONUS_MAX * fraction
         return 0.0

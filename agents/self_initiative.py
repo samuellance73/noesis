@@ -1,26 +1,26 @@
 """
 agents/self_initiative.py
 ──────────────────────────
-SelfInitiativeEngine — Proactive Agent Goals (Component 5).
+SelfInitiativeEngine — Proactive Agent Goals (Component 7).
 
 Principle: Autonomous Self-Determination.
 
-When the daemon's trigger_store is completely empty, it may invoke the
-SelfInitiativeEngine.  The engine reviews past logs and workspace context
-to generate a new, meaningful goal and submits it to the trigger_store
-with source="agent".
+When both the ingest_queue and the IntakeBuffer are empty (system verified idle),
+the core daemon invokes SelfInitiativeEngine.run().  The engine reviews recent
+agent.jsonl log history to generate a new, meaningful self-determined goal and
+submits it to the ingest_queue as a UnifiedIngestEvent with source_channel="agent".
 
-The self-generated trigger is then treated like any other trigger — it
-flows through the TriageDispatcher and is routed to the appropriate path
-(Fast-Path or Slow-Path) on the next daemon tick.
+The self-generated event is treated like any other ingest event — it flows through
+the IntakeBuffer → PerceptionLayer → TriageDispatcher → Dispatcher pipeline on the
+next processing tick.
 
 Design constraints
 ──────────────────
 • Lightweight: one STANDARD-tier LLM call, no heavy scanning.
-• Idempotent: the engine throttles itself via a cooldown to avoid
-  spamming the trigger_store when the daemon idles for a long time.
-• Non-blocking: the result is submitted to the store and the caller
-  returns immediately — execution happens on the next daemon tick.
+• Idempotent: the engine enforces its own cooldown timer so the daemon can call
+  run() on every idle check without risk of submission spam.
+• Non-blocking: the goal is submitted to ingest_queue and the caller returns
+  immediately — execution happens asynchronously on the next daemon tick.
 """
 
 from __future__ import annotations
@@ -31,7 +31,9 @@ import time
 from pathlib import Path
 
 from core.model_router import ModelRequest, ModelRouter, ModelTier
-from triggers.store import trigger_store
+from core.events import UnifiedIngestEvent, SenderClass, PriorityLevel
+from core.queues import ingest_queue
+from perception.stages.intake import IntakeBuffer
 from utils.log_writer import emit
 
 # Minimum seconds between self-initiative submissions to prevent spam.
@@ -60,9 +62,9 @@ class SelfInitiativeEngine:
         self._last_submission: float = 0.0
         self._lock = asyncio.Lock()
 
-    async def maybe_submit(self, router: ModelRouter) -> bool:
+    async def run(self, router: ModelRouter, intake_buffer: IntakeBuffer) -> bool:
         """
-        If the cooldown has elapsed and trigger_store is empty, generate and
+        If the cooldown has elapsed and the system is idle, generate and
         submit a new self-initiative goal.
 
         Returns True if a new goal was submitted, False otherwise.
@@ -71,24 +73,32 @@ class SelfInitiativeEngine:
             if time.monotonic() - self._last_submission < _COOLDOWN_SECONDS:
                 return False
 
-            # Double-check the store is truly empty before spending tokens
-            if trigger_store.get_pending():
+            # Double-check the system is truly idle before spending tokens
+            if not ingest_queue.empty() or intake_buffer.size > 0:
                 return False
 
-            goal = await self._generate_goal(router)
-            if not goal:
+            goal_description = await self._generate_goal(router)
+            if not goal_description:
                 return False
 
-            trigger_store.submit(
-                source="agent",
-                description=goal,
-                model=_DEFAULT_MODEL,
+            # Create a UnifiedIngestEvent for the self-initiated goal
+            event = UnifiedIngestEvent(
+                source_channel="agent",
+                sender_identifier="self_initiative_engine",
+                sender_class=SenderClass.AGENT,
+                raw_content=goal_description,
+                target_conversation_identifier="self_initiative", # Placeholder
+                priority_level=PriorityLevel.NORMAL,
+                metadata={
+                    "reason": "self_initiated_goal",
+                },
             )
+            await ingest_queue.put(event)
             self._last_submission = time.monotonic()
             emit(
                 "self_initiative.submitted",
                 "self_initiative",
-                {"goal": goal[:120]},
+                {"goal": goal_description[:120]},
             )
             return True
 

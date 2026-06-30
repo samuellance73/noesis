@@ -65,7 +65,7 @@ class AgentExecutor:
             for name, tool in self._registry.tools.items()
         )
         base_prompt = load_prompt("executor_system.txt")
-        return base_prompt.format(tool_docs=tool_docs)
+        return base_prompt.replace("{tool_docs}", tool_docs)
 
     # ------------------------------------------------------------------
     # Public API

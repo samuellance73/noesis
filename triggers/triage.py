@@ -200,11 +200,11 @@ class TriageDispatcher:
         lines = []
         for i, sig in enumerate(signals):
             rep = sig.representative
-            channel = rep.channel_id or rep.metadata.get("channel_id", "unknown")
+            channel = rep.target_conversation_identifier or "unknown"
             lines.append(
-                f"[{i}] source={rep.source.identifier} channel={channel} "
+                f"[{i}] source={rep.sender_identifier} channel={channel} "
                 f"authority={sig.authority_score:.2f}\n"
-                f'    "{rep.text[:400]}"'
+                f'    "{rep.raw_content[:400]}"'
             )
 
         user_msg = (
@@ -231,7 +231,7 @@ class TriageDispatcher:
                 slow_path_escalations=[
                     SlowPathEscalation(
                         signal_index=i,
-                        refined_goal=sig.representative.text,
+                        refined_goal=sig.representative.raw_content,
                     )
                     for i, sig in enumerate(signals)
                 ],

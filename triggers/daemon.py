@@ -147,6 +147,9 @@ async def _run_fast_path(trigger: Trigger, decision, run_id: str) -> None:
     """
     from agents.tools import tools_registry  # local import keeps circular deps clean
 
+    # Emit strategic.loop_started for dashboard consistency
+    emit("strategic.loop_started", "strategic", {"goal": trigger.description}, run_id=run_id)
+
     output_parts: list[str] = []
 
     for tool_call in decision.immediate_tool_calls:
@@ -160,7 +163,10 @@ async def _run_fast_path(trigger: Trigger, decision, run_id: str) -> None:
             },
             run_id=run_id,
         )
+        # Log tactical events for dashboard/log analyzers
+        emit("tactical.tool_call", "tactical", {"tool": tool_call.tool_name, "input": str(tool_call.tool_input)}, run_id=run_id)
         result = await tools_registry.execute(tool_call.tool_name, tool_call.tool_input)
+        emit("tactical.tool_result", "tactical", {"tool": tool_call.tool_name, "result": str(result)[:80]}, run_id=run_id)
         output_parts.append(result)
 
     if decision.final_answer:
@@ -177,6 +183,8 @@ async def _run_fast_path(trigger: Trigger, decision, run_id: str) -> None:
         "task_goal":      trigger.description[:80],
         "fast_path":      True,
     })
+    # Log tactical.final_answer for dashboard/log analyzers
+    emit("tactical.final_answer", "tactical", {"answer": final_text}, run_id=run_id)
     emit(
         "daemon.fast_path_complete",
         "daemon",
@@ -208,6 +216,10 @@ async def _run_as_executor(trigger: Trigger, router: ModelRouter, run_id: str) -
     overhead, no run logs written to disk.
     """
     from agents.schemas import AgentState
+
+    # Emit strategic.loop_started for dashboard consistency
+    emit("strategic.loop_started", "strategic", {"goal": trigger.description}, run_id=run_id)
+
     executor = AgentExecutor(
         router=router,
         task_label=f"trigger-{str(trigger.id)[:8]}",
@@ -218,6 +230,19 @@ async def _run_as_executor(trigger: Trigger, router: ModelRouter, run_id: str) -
         event["trigger_source"]   = trigger.source
         event["trigger_metadata"] = trigger.metadata or {}
         await event_bus.publish(event)
+
+        # Log tactical events for dashboard/log analyzers
+        ev = event.get("event")
+        if ev == "thought":
+            emit("tactical.thought", "tactical", {"thought": event.get("thought", ""), "iteration": event.get("step_index", 0) + 1}, run_id=run_id)
+        elif ev == "tool_start":
+            emit("tactical.tool_call", "tactical", {"tool": event.get("tool_name", ""), "input": str(event.get("tool_input", ""))}, run_id=run_id)
+        elif ev == "tool_observation":
+            emit("tactical.tool_result", "tactical", {"tool": event.get("tool_name", ""), "result": str(event.get("observation", ""))[:80]}, run_id=run_id)
+        elif ev == "final_answer":
+            emit("tactical.final_answer", "tactical", {"answer": str(event.get("answer", ""))}, run_id=run_id)
+        elif ev == "error":
+            emit("tactical.error", "tactical", {"msg": event.get("message", "")}, level="error", run_id=run_id)
 
 
 async def _update_discord_reaction(trigger: Trigger, emoji: str) -> None:

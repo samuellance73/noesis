@@ -26,39 +26,7 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
 
-
-# ─── Source / priority primitives ─────────────────────────────────────────────
-
-class SourceType(str, Enum):
-    OPERATOR  = "operator"    # config-defined, highest trust
-    TRUSTED   = "trusted"     # whitelisted users / internal services
-    USER      = "user"        # default authenticated user
-    ANONYMOUS = "anonymous"   # webhook / unknown origin
-    AGENT     = "agent"       # signals from other agents in the system
-
-
-class Priority(str, Enum):
-    HIGH   = "high"    # bypasses intake window
-    NORMAL = "normal"
-
-
-# ─── Raw signal ───────────────────────────────────────────────────────────────
-
-class RawSignalSource(BaseModel):
-    type: SourceType
-    identifier: str                   # user id, api key hash, agent id, etc.
-    display_name: str | None = None
-
-
-class RawSignal(BaseModel):
-    id: UUID = Field(default_factory=uuid4)
-    source: RawSignalSource
-    text: str
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
-    priority: Priority = Priority.NORMAL
-    channel_id: str | None = None
-    thread_id: str | None = None
-    metadata: dict = Field(default_factory=dict)
+from core.events import UnifiedIngestEvent, SenderClass, PriorityLevel
 
 
 # ─── Perception type ──────────────────────────────────────────────────────────
@@ -76,13 +44,12 @@ class PerceptionType(str, Enum):
 
 class ScoredSignal(BaseModel):
     """
-    A raw signal after authority scoring.
+    A signal after authority scoring, containing the original unified ingest event.
     This is the input type for the LLM bundle processing.
     """
     id: UUID = Field(default_factory=uuid4)
-    representative: RawSignal
+    representative: UnifiedIngestEvent # Now holds the UnifiedIngestEvent
     frequency: int = 1
-    sources: list[RawSignalSource] = Field(default_factory=list)
     perception_type: PerceptionType | None = None
     authority_score: float
 

@@ -34,11 +34,15 @@ from typing import Optional
 
 import discord
 
-from triggers.store import trigger_store
+
 from utils.event_bus import event_bus
-from perception.schemas import RawSignal, RawSignalSource, SourceType, Priority
+from core.events import UnifiedIngestEvent, SenderClass, PriorityLevel
 from utils.log_writer import emit
 from utils.callbacks import ServiceRegistry
+from agents.goal_manager import GoalManager
+from agents.executor import AgentExecutor
+from core.model_router import ModelRouter
+from uuid import uuid4
 
 # ── Config ────────────────────────────────────────────────────────────────────
 # Username (not display name) that is treated as the human operator.
@@ -329,12 +333,24 @@ async def _handle_human_message(message: discord.Message) -> None:
                 f"Task: {instruction}"
             )
 
-        trigger_store.submit(
-            source="executor",
-            description=description,
-            model=DEFAULT_MODEL,
-            metadata={"channel_id": message.channel.id, "message_id": message.id},
+        run_id = str(uuid4())
+        executor = AgentExecutor(
+            router=bot.model_router,
+            task_label=f"discord-quick-{run_id[:8]}",
         )
+
+        async def _run_executor():
+            async for event in executor.run_generator(description):
+                from utils.event_bus import event_bus
+                event["trigger_source"] = "human"
+                event["trigger_metadata"] = {
+                    "channel_id": message.channel.id,
+                    "message_id": message.id,
+                }
+                await event_bus.publish(event)
+
+        asyncio.create_task(_run_executor(), name=f"executor-{run_id[:8]}")
+
         await message.add_reaction("⚡")
         return
 
@@ -348,12 +364,21 @@ async def _handle_human_message(message: discord.Message) -> None:
             f"Human instruction: {text}"
         )
 
-    trigger_store.submit(
-        source="human",
-        description=description,
-        model=DEFAULT_MODEL,
-        metadata={"channel_id": message.channel.id, "message_id": message.id},
-    )
+    run_id = str(uuid4())
+    goal_manager = GoalManager(router=bot.model_router)
+
+    async def _run_goal_manager():
+        async for event in goal_manager.run_stream(description, run_id=run_id):
+            from utils.event_bus import event_bus
+            event["trigger_source"] = "human"
+            event["trigger_metadata"] = {
+                "channel_id": message.channel.id,
+                "message_id": message.id,
+            }
+            await event_bus.publish(event)
+
+    asyncio.create_task(_run_goal_manager(), name=f"goal-manager-{run_id[:8]}")
+
     await message.add_reaction("🚀")
 
 
@@ -395,17 +420,13 @@ async def _handle_neutral_message(message: discord.Message) -> None:
     else:
         full_text = current_header
 
-    signal = RawSignal(
-        source=RawSignalSource(
-            type=SourceType.USER,
-            identifier=message.author.name,
-            display_name=message.author.display_name,
-        ),
-        text=full_text,
-        priority=Priority.NORMAL,
-        channel_id=str(message.channel.id),
-        # Store the raw current message text so the Router can use it directly
-        # as the trigger description rather than relying on the LLM summary.
+    event = UnifiedIngestEvent(
+        source_channel="discord",
+        sender_identifier=message.author.name,
+        sender_class=SenderClass.EXTERNAL,
+        raw_content=full_text,
+        target_conversation_identifier=str(message.channel.id),
+        priority_level=PriorityLevel.NORMAL,
         metadata={
             "message_id": message.id,
             "channel_id": message.channel.id,
@@ -417,7 +438,7 @@ async def _handle_neutral_message(message: discord.Message) -> None:
 
     # Access perception layer through instance variable injected at startup
     if hasattr(bot, "perception_layer") and bot.perception_layer:
-        await bot.perception_layer.ingest(signal)
+        await bot.perception_layer.ingest(event)
     else:
         emit("discord.warning", "system", {"msg": "PerceptionLayer not initialized on bot; dropping message."}, level="warn")
         return

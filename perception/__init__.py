@@ -18,23 +18,17 @@ Then wire it into app/lifespan.py:
 from .layer import PerceptionLayer
 from .config import PerceptionConfig
 from .schemas import (
-    RawSignal,
-    RawSignalSource,
-    SourceType,
-    Priority,
     PerceptionType,
     PerceptionEvent,
     ResponseJob,
+    ScoredSignal
 )
 
 __all__ = [
     "PerceptionLayer",
     "PerceptionConfig",
-    "RawSignal",
-    "RawSignalSource",
-    "SourceType",
-    "Priority",
     "PerceptionType",
     "PerceptionEvent",
     "ResponseJob",
+    "ScoredSignal"
 ]

@@ -136,8 +136,8 @@ async def test_goal_manager_with_memory_and_critic():
     manager = GoalManager(router=router, max_cycles=2)
 
     with patch("agents.goal_manager.AgentExecutor.run_generator", side_effect=mock_run_generator), \
-         patch("agents.goal_manager.EpisodicStore.load_relevant", return_value=[]) as mock_load, \
-         patch("agents.goal_manager.EpisodicWriter.write_summary") as mock_write:
+         patch("agents.memory.episodic_store.EpisodicStore.load_relevant", return_value=[]) as mock_load, \
+         patch("agents.memory.episodic_writer.EpisodicWriter.write_summary") as mock_write:
 
         events = []
         async for event in manager.run_stream("Define gravity"):

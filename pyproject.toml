@@ -29,3 +29,7 @@ dev = [
     "pytest>=9.0.3",
     "pytest-asyncio>=1.4.0",
 ]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["agents", "app", "config", "core", "integrations", "interfaces", "perception", "prompts", "triggers", "utils"]

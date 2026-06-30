@@ -4,4 +4,6 @@ __pycache__/
 .env
 uv.lock
 logs/
+agent.egg-info/
+build/
 
